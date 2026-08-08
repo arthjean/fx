@@ -1130,6 +1130,7 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator, defau
                 state.cfg.default_model,
                 default_fast_mode,
                 state.cfg.default_agent_step_limit,
+                state.cfg.gateway_provider.connection_seed,
             );
         }
     }
