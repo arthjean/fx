@@ -968,7 +968,7 @@ describe("filesystem path handling", () => {
         expect(readFileSync(target, "utf8")).toBe(content);
         const trace = readFileSync(tracePath, "utf8");
         expect(trace).toContain("event=auto_review_compose_result result=ready");
-        expect(trace).toContain("event=auto_review_transport_start");
+        expect(trace).toContain("event=auto_review_send attempt=1");
         expect(trace).toContain(
           "event=auto_review_result tool_name=write_file decision=allow",
         );

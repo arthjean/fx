@@ -6006,7 +6006,7 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(2);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(2);
+      expect(trace.match(/event=auto_review_send/g)).toHaveLength(2);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=allow");
       expect(result.stderr).toContain("Auto agent approved this request:");
@@ -6044,7 +6044,7 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(1);
       expect(gateway.classifierRequests).toHaveLength(2);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(2);
+      expect(trace.match(/event=auto_review_send/g)).toHaveLength(2);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=permission_required fallback_reason=invalid_or_unavailable");
       expect(result.stderr).not.toContain(COMMAND_APPROVAL_PROMPT);
@@ -6087,7 +6087,7 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(1);
       expect(gateway.classifierRequests).toHaveLength(2);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(2);
+      expect(trace.match(/event=auto_review_send/g)).toHaveLength(2);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=permission_required fallback_reason=invalid_or_unavailable");
     },
