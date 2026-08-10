@@ -2919,6 +2919,7 @@ fn processQueuedPromptLoop(
                 .auto;
             const model_request = agent_stream_provider.ModelRequest{
                 .serialized_tools = config.gateway_tools_json,
+                .provider_tools = config.provider_tools,
                 .messages = request_messages,
                 .tool_choice = tool_choice,
                 .selected_dynamic_tool_schemas = selected_dynamic_tool_schemas.items,
