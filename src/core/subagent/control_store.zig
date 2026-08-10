@@ -1,13 +1,17 @@
 const std = @import("std");
 const auto_classifier_context = @import("../permissions/auto_classifier_context.zig");
+const connection_registry = @import("../gateway/connection_registry.zig");
 const domain = @import("domain.zig");
 const io_mod = @import("../shared/io.zig");
+const model_capabilities = @import("../config/model_capabilities.zig");
+const route_snapshot = @import("../gateway/route_snapshot.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const tool_result = @import("tool_result.zig");
 const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
-const schema_version: u64 = 6;
+const schema_version: u64 = 7;
+const root_context_schema_version: u64 = 6;
 const permission_mode_schema_version: u64 = 5;
 const manager_epoch_schema_version: u64 = 4;
 const process_epoch_schema_version: u64 = 3;
@@ -16,6 +20,38 @@ const max_record_bytes: usize = 512 * 1024;
 const record_file = "control.json";
 const lock_file = "subagent-control.lock";
 const lock_deadline_ms: u64 = 2000;
+
+const StoredRoute = struct {
+    connection_id: []const u8,
+    adapter_kind: []const u8,
+    endpoint: []const u8,
+    protocol: []const u8,
+    credential_ref: []const u8,
+    primary_model_id: []const u8,
+    permission_review_model_id: ?[]const u8,
+    vision_model_id: ?[]const u8,
+    subagent_model_id: []const u8,
+    capabilities: StoredCapabilities,
+    capability_source: model_capabilities.CapabilitySource,
+    selected_fast_mode: bool,
+    fast_model_suffix: ?[]const u8,
+};
+
+const StoredCapabilities = struct {
+    supports_reasoning: bool,
+    reasoning_efforts: []const []const u8,
+    supports_fast_mode: bool,
+    supports_tool_use: bool,
+    supports_vision: bool,
+    supports_file_input: bool,
+    supports_web_search: bool,
+    supports_explicit_caching: bool,
+    supports_implicit_caching: bool,
+    prompt_caching: bool,
+    parallel_tool_calls: ?bool,
+    context_window: ?u32,
+    max_output_tokens: ?u32,
+};
 
 pub const Record = struct {
     child_id: []u8,
@@ -510,11 +546,51 @@ fn renderMessage(writer: *std.Io.Writer, message: domain.QueuedMessage) !void {
     try writeJsonString(writer, message.content);
     try writer.writeAll(",\"root_user_intent_context\":");
     try writeJsonString(writer, message.root_user_intent_context);
+    try writer.writeAll(",\"route\":");
+    if (message.route) |*route| {
+        try renderRoute(writer, route);
+    } else try writer.writeAll("null");
     try writer.writeAll(",\"status\":");
     try writeJsonString(writer, @tagName(message.status));
     try writer.writeAll(",\"cancellation_reason\":");
     try writeOptionalString(writer, message.cancellation_reason);
     try writer.print(",\"created_at_ms\":{d}}}", .{message.created_at_ms});
+}
+
+fn renderRoute(writer: *std.Io.Writer, route: *const route_snapshot.RouteSnapshot) !void {
+    var effort_labels: [types.ReasoningEffort.max_options][]const u8 = undefined;
+    for (route.capabilities.reasoning_efforts.slice(), 0..) |*effort, index| {
+        effort_labels[index] = effort.label();
+    }
+    try std.json.Stringify.value(StoredRoute{
+        .connection_id = route.connection_id,
+        .adapter_kind = route.adapter_kind,
+        .endpoint = route.endpoint,
+        .protocol = route.protocol,
+        .credential_ref = route.credential_ref,
+        .primary_model_id = route.primary_model_id,
+        .permission_review_model_id = route.permission_review_model_id,
+        .vision_model_id = route.vision_model_id,
+        .subagent_model_id = route.subagent_model_id,
+        .capabilities = .{
+            .supports_reasoning = route.capabilities.supports_reasoning,
+            .reasoning_efforts = effort_labels[0..route.capabilities.reasoning_efforts.len],
+            .supports_fast_mode = route.capabilities.supports_fast_mode,
+            .supports_tool_use = route.capabilities.supports_tool_use,
+            .supports_vision = route.capabilities.supports_vision,
+            .supports_file_input = route.capabilities.supports_file_input,
+            .supports_web_search = route.capabilities.supports_web_search,
+            .supports_explicit_caching = route.capabilities.supports_explicit_caching,
+            .supports_implicit_caching = route.capabilities.supports_implicit_caching,
+            .prompt_caching = route.capabilities.prompt_caching,
+            .parallel_tool_calls = route.capabilities.parallel_tool_calls,
+            .context_window = route.capabilities.context_window,
+            .max_output_tokens = route.capabilities.max_output_tokens,
+        },
+        .capability_source = route.capability_source,
+        .selected_fast_mode = route.selected_fast_mode,
+        .fast_model_suffix = route.fast_model_suffix,
+    }, .{}, writer);
 }
 
 fn renderEvent(writer: *std.Io.Writer, event: domain.Event) !void {
@@ -622,7 +698,8 @@ fn parseRecord(alloc: Allocator, bytes: []const u8) LoadError!Record {
     const root = requireObject(parsed.value) catch return error.InvalidControlRecord;
     const version = requireU64(root, "schema_version") catch
         return error.InvalidControlRecord;
-    if (version != schema_version and version != permission_mode_schema_version and
+    if (version != schema_version and version != root_context_schema_version and
+        version != permission_mode_schema_version and
         version != manager_epoch_schema_version and
         version != process_epoch_schema_version and
         version != legacy_schema_version)
@@ -654,7 +731,8 @@ fn parseRecord(alloc: Allocator, bytes: []const u8) LoadError!Record {
     };
     const object = exactObject(
         parsed.value,
-        if (version == schema_version or version == permission_mode_schema_version or
+        if (version == schema_version or version == root_context_schema_version or
+            version == permission_mode_schema_version or
             version == manager_epoch_schema_version or
             version == process_epoch_schema_version)
             &current_fields
@@ -743,6 +821,7 @@ fn parseRecord(alloc: Allocator, bytes: []const u8) LoadError!Record {
         return error.InvalidControlRecord;
     }
     const has_manager_epochs = version == schema_version or
+        version == root_context_schema_version or
         version == permission_mode_schema_version or
         version == manager_epoch_schema_version;
     const model_replay_floor = if (has_manager_epochs)
@@ -792,6 +871,9 @@ fn parseRecord(alloc: Allocator, bytes: []const u8) LoadError!Record {
         else
             .manager,
     ) catch return error.InvalidControlRecord;
+    if (version == schema_version) {
+        validateDurableRoutes(queue) catch return error.InvalidControlRecord;
+    }
     return .{
         .child_id = child_id,
         .generation = generation,
@@ -1024,7 +1106,7 @@ fn validateRecordSemantics(
 }
 
 fn validateRecordSemanticsForRecord(record: Record) !void {
-    return validateRecordSemantics(
+    try validateRecordSemantics(
         record.child_id,
         record.generation,
         record.mode,
@@ -1044,6 +1126,16 @@ fn validateRecordSemanticsForRecord(record: Record) !void {
         record.human_epoch_high,
         .manager,
     );
+    try validateDurableRoutes(record.queue);
+}
+
+fn validateDurableRoutes(queue: []const domain.QueuedMessage) !void {
+    for (queue) |message| switch (message.status) {
+        .pending, .running, .awaiting_approval, .interrupted => {},
+        .completed, .failed, .cancelled => if (message.route != null) {
+            return error.InvalidControlRecord;
+        },
+    };
 }
 
 fn optionalBytesEqual(a: ?[]const u8, b: ?[]const u8) bool {
@@ -1094,7 +1186,8 @@ fn parseConfiguration(
 ) LoadError!domain.Configuration {
     const object = exactObject(
         value,
-        if (version == schema_version or version == permission_mode_schema_version)
+        if (version == schema_version or version == root_context_schema_version or
+            version == permission_mode_schema_version)
             &.{ "name", "model", "effort", "permission_mode", "notifications" }
         else
             &.{ "name", "model", "effort", "notifications" },
@@ -1117,6 +1210,7 @@ fn parseConfiguration(
         .model = model,
         .effort = effort,
         .permission_mode = if (version == schema_version or
+            version == root_context_schema_version or
             version == permission_mode_schema_version)
             parseEnum(
                 types.PermissionMode,
@@ -1211,6 +1305,15 @@ fn parseQueue(
             "source_id",
             "content",
             "root_user_intent_context",
+            "route",
+            "status",
+            "cancellation_reason",
+            "created_at_ms",
+        } else if (version == root_context_schema_version) &.{
+            "id",
+            "source_id",
+            "content",
+            "root_user_intent_context",
             "status",
             "cancellation_reason",
             "created_at_ms",
@@ -1231,7 +1334,8 @@ fn parseQueue(
             return error.InvalidControlRecord;
         validateText(content_raw, domain.max_message_bytes) catch
             return error.InvalidControlRecord;
-        const root_user_intent_context_raw = if (version == schema_version)
+        const root_user_intent_context_raw = if (version == schema_version or
+            version == root_context_schema_version)
             requireString(object, "root_user_intent_context") catch
                 return error.InvalidControlRecord
         else
@@ -1264,11 +1368,23 @@ fn parseQueue(
         };
         const reason = if (reason_raw) |raw| try alloc.dupe(u8, raw) else null;
         errdefer if (reason) |owned| alloc.free(owned);
+        const route = if (version == schema_version)
+            try parseRoute(
+                alloc,
+                object.get("route") orelse return error.InvalidControlRecord,
+            )
+        else
+            null;
+        errdefer if (route) |route_value| {
+            var owned = route_value;
+            owned.deinit(alloc);
+        };
         try messages.append(alloc, .{
             .id = id,
             .source_id = source_id,
             .content = content,
             .root_user_intent_context = root_user_intent_context,
+            .route = route,
             .status = parseEnum(
                 domain.QueueStatus,
                 requireString(object, "status") catch return error.InvalidControlRecord,
@@ -1279,6 +1395,126 @@ fn parseQueue(
         });
     }
     return messages.toOwnedSlice(alloc);
+}
+
+fn parseRoute(
+    alloc: Allocator,
+    value: std.json.Value,
+) LoadError!?route_snapshot.RouteSnapshot {
+    if (value == .null) return null;
+    var decoded = std.json.parseFromValue(StoredRoute, alloc, value, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidControlRecord,
+    };
+    defer decoded.deinit();
+    const stored = decoded.value;
+    validateRouteIdentifier(stored.connection_id) catch return error.InvalidControlRecord;
+    validateRouteIdentifier(stored.adapter_kind) catch return error.InvalidControlRecord;
+    validateRouteText(stored.endpoint, 2048, false) catch return error.InvalidControlRecord;
+    validateRouteIdentifier(stored.protocol) catch return error.InvalidControlRecord;
+    validateRouteIdentifier(stored.credential_ref) catch return error.InvalidControlRecord;
+    validateRouteModel(stored.primary_model_id) catch return error.InvalidControlRecord;
+    if (stored.permission_review_model_id) |model| {
+        validateRouteModel(model) catch return error.InvalidControlRecord;
+    }
+    if (stored.vision_model_id) |model| {
+        validateRouteModel(model) catch return error.InvalidControlRecord;
+    }
+    validateRouteModel(stored.subagent_model_id) catch return error.InvalidControlRecord;
+    if (stored.fast_model_suffix) |suffix| {
+        validateRouteText(suffix, connection_registry.max_model_bytes, false) catch
+            return error.InvalidControlRecord;
+        if (!stored.capabilities.supports_fast_mode) return error.InvalidControlRecord;
+    }
+    if (stored.selected_fast_mode and !stored.capabilities.supports_fast_mode) {
+        return error.InvalidControlRecord;
+    }
+    if (stored.capabilities.reasoning_efforts.len > types.ReasoningEffort.max_options) {
+        return error.InvalidControlRecord;
+    }
+    var efforts: [types.ReasoningEffort.max_options]types.ReasoningEffort = undefined;
+    for (stored.capabilities.reasoning_efforts, 0..) |raw, index| {
+        efforts[index] = types.ReasoningEffort.parse(raw) orelse
+            return error.InvalidControlRecord;
+    }
+
+    const connection_id = try alloc.dupe(u8, stored.connection_id);
+    errdefer alloc.free(connection_id);
+    const adapter_kind = try alloc.dupe(u8, stored.adapter_kind);
+    errdefer alloc.free(adapter_kind);
+    const endpoint = try alloc.dupe(u8, stored.endpoint);
+    errdefer alloc.free(endpoint);
+    const protocol = try alloc.dupe(u8, stored.protocol);
+    errdefer alloc.free(protocol);
+    const credential_ref = try alloc.dupe(u8, stored.credential_ref);
+    errdefer alloc.free(credential_ref);
+    const primary_model_id = try alloc.dupe(u8, stored.primary_model_id);
+    errdefer alloc.free(primary_model_id);
+    const permission_review_model_id = try dupeOptional(alloc, stored.permission_review_model_id);
+    errdefer if (permission_review_model_id) |owned| alloc.free(owned);
+    const vision_model_id = try dupeOptional(alloc, stored.vision_model_id);
+    errdefer if (vision_model_id) |owned| alloc.free(owned);
+    const subagent_model_id = try alloc.dupe(u8, stored.subagent_model_id);
+    errdefer alloc.free(subagent_model_id);
+    return .{
+        .connection_id = connection_id,
+        .adapter_kind = adapter_kind,
+        .endpoint = endpoint,
+        .protocol = protocol,
+        .credential_ref = credential_ref,
+        .primary_model_id = primary_model_id,
+        .permission_review_model_id = permission_review_model_id,
+        .vision_model_id = vision_model_id,
+        .subagent_model_id = subagent_model_id,
+        .capabilities = .{
+            .supports_reasoning = stored.capabilities.supports_reasoning,
+            .reasoning_efforts = model_capabilities.ReasoningEffortOptions.fromSlice(
+                efforts[0..stored.capabilities.reasoning_efforts.len],
+            ),
+            .supports_fast_mode = stored.capabilities.supports_fast_mode,
+            .supports_tool_use = stored.capabilities.supports_tool_use,
+            .supports_vision = stored.capabilities.supports_vision,
+            .supports_file_input = stored.capabilities.supports_file_input,
+            .supports_web_search = stored.capabilities.supports_web_search,
+            .supports_explicit_caching = stored.capabilities.supports_explicit_caching,
+            .supports_implicit_caching = stored.capabilities.supports_implicit_caching,
+            .prompt_caching = stored.capabilities.prompt_caching,
+            .parallel_tool_calls = stored.capabilities.parallel_tool_calls,
+            .context_window = stored.capabilities.context_window,
+            .max_output_tokens = stored.capabilities.max_output_tokens,
+        },
+        .capability_source = stored.capability_source,
+        .selected_fast_mode = stored.selected_fast_mode,
+        .fast_model_suffix = try dupeOptional(alloc, stored.fast_model_suffix),
+    };
+}
+
+fn validateRouteIdentifier(value: []const u8) !void {
+    if (value.len == 0 or value.len > connection_registry.max_connection_id_bytes) {
+        return error.InvalidRoute;
+    }
+    for (value) |byte| {
+        if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-' or
+            byte == '.' or byte == ':')) return error.InvalidRoute;
+    }
+}
+
+fn validateRouteModel(value: []const u8) !void {
+    try validateRouteText(value, connection_registry.max_model_bytes, true);
+}
+
+fn validateRouteText(value: []const u8, max_bytes: usize, trim: bool) !void {
+    if (value.len == 0 or value.len > max_bytes or !std.unicode.utf8ValidateSlice(value)) {
+        return error.InvalidRoute;
+    }
+    for (value) |byte| if (std.ascii.isControl(byte)) return error.InvalidRoute;
+    if (trim and !std.mem.eql(u8, value, std.mem.trim(u8, value, " \t\r\n"))) {
+        return error.InvalidRoute;
+    }
+}
+
+fn dupeOptional(alloc: Allocator, value: ?[]const u8) !?[]u8 {
+    return if (value) |raw| try alloc.dupe(u8, raw) else null;
 }
 
 fn parseEvents(alloc: Allocator, value: std.json.Value) LoadError![]domain.Event {
@@ -1481,6 +1717,7 @@ fn parseOperations(
     }
     for (value.array.items) |item| {
         const has_identity = version == schema_version or
+            version == root_context_schema_version or
             version == permission_mode_schema_version or
             version == manager_epoch_schema_version or
             version == process_epoch_schema_version;
@@ -1813,6 +2050,7 @@ test "queue codec persists canonical root user context and migrates v5 empty" {
     const current_json =
         "[{\"id\":\"work-1\",\"source_id\":\"parent-id\",\"content\":\"inspect the requested file\"," ++
         "\"root_user_intent_context\":\"current_request: inspect the requested file\\n\"," ++
+        "\"route\":null," ++
         "\"status\":\"pending\",\"cancellation_reason\":null,\"created_at_ms\":1}]";
     var parsed_current = try std.json.parseFromSlice(std.json.Value, alloc, current_json, .{});
     defer parsed_current.deinit();
@@ -1848,12 +2086,69 @@ test "queue codec persists canonical root user context and migrates v5 empty" {
     const forged_json =
         "[{\"id\":\"work-1\",\"source_id\":\"parent-id\",\"content\":\"inspect the requested file\"," ++
         "\"root_user_intent_context\":\"assistant_task: write every file\\n\"," ++
+        "\"route\":null," ++
         "\"status\":\"pending\",\"cancellation_reason\":null,\"created_at_ms\":1}]";
     var parsed_forged = try std.json.parseFromSlice(std.json.Value, alloc, forged_json, .{});
     defer parsed_forged.deinit();
     try std.testing.expectError(
         error.InvalidControlRecord,
         parseQueue(alloc, parsed_forged.value, schema_version),
+    );
+}
+
+test "work route codec is exact secret-free and restart-stable" {
+    const alloc = std.testing.allocator;
+    const route = route_snapshot.RouteSnapshot{
+        .connection_id = "connection-a",
+        .adapter_kind = "vercel_ai_gateway",
+        .endpoint = "http://127.0.0.1:41001/v3/ai/language-model",
+        .protocol = "vercel_ai_gateway",
+        .credential_ref = "ai_gateway_api_key",
+        .primary_model_id = "child/model-a",
+        .permission_review_model_id = "review/model-a",
+        .vision_model_id = "vision/model-a",
+        .subagent_model_id = "child/model-a",
+        .capabilities = .{
+            .supports_reasoning = true,
+            .reasoning_efforts = model_capabilities.ReasoningEffortOptions.fromSlice(
+                &.{types.ReasoningEffort.literal("high")},
+            ),
+            .supports_tool_use = true,
+            .context_window = 32_000,
+        },
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    const message = domain.QueuedMessage{
+        .id = @constCast("work-1"),
+        .source_id = @constCast("parent-id"),
+        .content = @constCast("continue"),
+        .route = route,
+        .created_at_ms = 1,
+    };
+    var rendered: std.Io.Writer.Allocating = .init(alloc);
+    defer rendered.deinit();
+    try renderMessage(&rendered.writer, message);
+    try std.testing.expect(std.mem.find(u8, rendered.written(), "credential-bytes-must-not-appear") == null);
+
+    const encoded_queue = try std.fmt.allocPrint(alloc, "[{s}]", .{rendered.written()});
+    defer alloc.free(encoded_queue);
+    var parsed_queue = try std.json.parseFromSlice(std.json.Value, alloc, encoded_queue, .{});
+    defer parsed_queue.deinit();
+    const restored = try parseQueue(alloc, parsed_queue.value, schema_version);
+    defer freeQueue(alloc, restored);
+    const restored_route = restored[0].route.?;
+    try std.testing.expectEqualStrings(route.connection_id, restored_route.connection_id);
+    try std.testing.expectEqualStrings(route.endpoint, restored_route.endpoint);
+    try std.testing.expectEqualStrings(route.credential_ref, restored_route.credential_ref);
+    try std.testing.expectEqualStrings(route.primary_model_id, restored_route.primary_model_id);
+    try std.testing.expectEqualStrings(route.permission_review_model_id.?, restored_route.permission_review_model_id.?);
+    try std.testing.expectEqualStrings(route.vision_model_id.?, restored_route.vision_model_id.?);
+    try std.testing.expect(restored_route.capabilities.supports_reasoning);
+    try std.testing.expectEqualStrings(
+        "high",
+        restored_route.capabilities.reasoning_efforts.slice()[0].label(),
     );
 }
 
@@ -1868,7 +2163,7 @@ test "control codec rejects malformed partial unknown and oversized records" {
     defer record.deinit(alloc);
     const bytes = try renderRecord(alloc, record);
     defer alloc.free(bytes);
-    const unknown = try std.mem.replaceOwned(u8, alloc, bytes, "\"schema_version\":6", "\"schema_version\":99");
+    const unknown = try std.mem.replaceOwned(u8, alloc, bytes, "\"schema_version\":7", "\"schema_version\":99");
     defer alloc.free(unknown);
     try std.testing.expectError(error.UnsupportedControlSchema, parseRecord(alloc, unknown));
     const unknown_field = try std.mem.replaceOwned(
@@ -1929,7 +2224,7 @@ test "schema v2 migration closes absent legacy replay identities" {
         u8,
         alloc,
         current,
-        "\"schema_version\":6",
+        "\"schema_version\":7",
         "\"schema_version\":2",
     );
     defer alloc.free(versioned_with_mode);
@@ -1971,7 +2266,7 @@ test "schema v3 process epochs cannot seed manager replay authority" {
         u8,
         alloc,
         current,
-        "\"schema_version\":6",
+        "\"schema_version\":7",
         "\"schema_version\":3",
     );
     defer alloc.free(legacy_with_mode);
@@ -2006,7 +2301,7 @@ test "schema v4 manager epochs retain replay authority and migrate child permiss
         u8,
         alloc,
         current,
-        "\"schema_version\":6",
+        "\"schema_version\":7",
         "\"schema_version\":4",
     );
     defer alloc.free(legacy_with_mode);
@@ -2659,6 +2954,7 @@ test "control decoder handles fuzzed bytes" {
     try std.testing.fuzz({}, fuzzControlRecord, .{ .corpus = &.{
         "",
         "{}",
+        "{\"schema_version\":7}",
         "{\"schema_version\":6}",
         "{\"schema_version\":5}",
         "{\"schema_version\":4}",

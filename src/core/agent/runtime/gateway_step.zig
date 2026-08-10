@@ -23,6 +23,17 @@ pub const StreamResult = struct {
     completion: types.GatewayCompletion = .{},
     err_body: ?[]u8 = null,
     retry_after_seconds: ?u64 = null,
+
+    pub fn deinit(self: *StreamResult, alloc: Allocator) void {
+        deinitCollectedCompletion(alloc, self.completion);
+        if (self.err_body) |body| alloc.free(body);
+        self.* = undefined;
+    }
+};
+
+pub const StreamFailureInfo = struct {
+    category: agent_stream_provider.StreamFailure.Category,
+    retryable: bool,
 };
 
 const CollectedTerminal = union(enum) {
@@ -30,7 +41,8 @@ const CollectedTerminal = union(enum) {
     finish,
     failure: struct {
         category: agent_stream_provider.StreamFailure.Category,
-        http_status: ?std.http.Status = null,
+        retryable: bool,
+        http_status: ?std.http.Status,
         retry_after_seconds: ?u64,
     },
     cancelled,
@@ -142,6 +154,7 @@ const AdapterEventCollector = struct {
                 if (failure.category == .ambiguous_delivery or failure.delivery_ambiguous) self.completion.delivery_ambiguous = true;
                 self.terminal = .{ .failure = .{
                     .category = failure.category,
+                    .retryable = failure.retryable,
                     .http_status = failure.http_status,
                     .retry_after_seconds = failure.retry_after_seconds,
                 } };
@@ -250,8 +263,10 @@ pub fn streamModelRequest(
     usage_allocator: Allocator,
     trace_ctx: TraceContext,
     content_capture_limit: ?usize,
+    failure_info: ?*?StreamFailureInfo,
     provider_attempt_owner: agent_stream_provider.ProviderAttemptOwner,
 ) !StreamResult {
+    if (failure_info) |output| output.* = null;
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
     const started_at_ms = io_mod.milliTimestamp();
     const usage_observation = try session_usage.GatewayObservation.begin(usage);
@@ -290,12 +305,26 @@ pub fn streamModelRequest(
         .sink_error = &sink_error,
         .emit_fn = AdapterEventCollector.emit,
     }) catch |err| {
+        if (failure_info) |output| switch (collector.terminal) {
+            .failure => |failure| output.* = .{
+                .category = failure.category,
+                .retryable = failure.retryable,
+            },
+            .none, .finish, .cancelled => {},
+        };
         runtime_telemetry.recordGatewayCallMetric(model, started_at_ms, 0, 0, 0, 0, trace_ctx.turn_id, trace_ctx.step_id, trace_ctx.subagent_id, @errorName(err), "");
         try usage_observation.fail(LegacyGatewayCompatibilityBridge.failedDeliveryOutcome(&collector, delivery));
         return err;
     };
 
     const legacy = try LegacyGatewayCompatibilityBridge.fromCollector(&collector);
+    if (failure_info) |output| switch (collector.terminal) {
+        .failure => |failure| output.* = .{
+            .category = failure.category,
+            .retryable = failure.retryable,
+        },
+        .none, .finish, .cancelled => {},
+    };
     if (legacy.cancelled) {
         runtime_telemetry.recordGatewayCallMetric(model, started_at_ms, 0, 0, 0, 0, trace_ctx.turn_id, trace_ctx.step_id, trace_ctx.subagent_id, "Cancelled", "");
         try usage_observation.fail(if (delivery.load() == .possibly_sent)
@@ -579,6 +608,8 @@ fn testingRoute(endpoint: []const u8) route_snapshot.RouteSnapshot {
         .credential_ref = @constCast("test_ref"),
         .primary_model_id = @constCast("test/model"),
         .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = @constCast("test/model"),
         .capabilities = .{},
         .capability_source = .configured,
         .selected_fast_mode = false,
@@ -608,7 +639,7 @@ test "neutral adapter events materialize owned completion state" {
             _: agent_stream_provider.AdapterRequest,
             events: agent_stream_provider.EventSink,
         ) anyerror!void {
-            var generation = [_]u8{ 'g', 'e', 'n', '_', 's', 'a', 'f', 'e' };
+            var generation = [_]u8{ 'g', 'e', 'n', '_', '0', '1', 'A', 'R', 'Z', '3', 'N', 'D', 'E', 'K', 'T', 'S', 'V', '4', 'R', 'R', 'F', 'F', 'Q', '6', '9', 'G', '5', 'F', 'A', 'V' };
             const local_call = types.ToolCall{
                 .id = "local_1",
                 .name = "read_file",
@@ -630,7 +661,10 @@ test "neutral adapter events materialize owned completion state" {
             try events.emit(.{ .usage = .{ .tokens = .{ .input_tokens = 3, .output_tokens = 5 } } });
             try events.emit(.{ .finish = .{
                 .reason = .tool_calls,
-                .generation_reference = .{ .id = &generation },
+                .generation_reference = .{
+                    .id = &generation,
+                    .lookup_scope = "https://example.invalid/generation",
+                },
             } });
             @memset(&generation, 'x');
         }
@@ -644,6 +678,8 @@ test "neutral adapter events materialize owned completion state" {
     var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     var route = testingRoute("https://example.invalid");
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(std.testing.allocator);
     const result = try streamModelRequest(
         .{ .kind = "test", .stream_fn = Fake.stream },
         std.testing.allocator,
@@ -668,9 +704,10 @@ test "neutral adapter events materialize owned completion state" {
         null,
         null,
         &cancel_flag,
-        null,
+        &usage,
         std.testing.allocator,
         .{},
+        null,
         null,
         .agent,
     );
@@ -684,7 +721,12 @@ test "neutral adapter events materialize owned completion state" {
     try std.testing.expectEqualStrings("{\"results\":[]}", result.completion.tool_calls[1].provider_result.?);
     try std.testing.expectEqual(@as(?u64, 3), result.completion.usage.input_tokens);
     try std.testing.expectEqual(@as(?u64, 5), result.completion.usage.output_tokens);
-    try std.testing.expectEqualStrings("gen_safe", result.completion.generation_id.?);
+    try std.testing.expectEqualStrings("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV", result.completion.generation_id.?);
+    var usage_snapshot = try usage.snapshot(std.testing.allocator);
+    defer usage_snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqual(session_usage.Availability.pending, usage_snapshot.billing);
+    try std.testing.expectEqual(@as(usize, 1), usage_snapshot.pending.len);
+    try std.testing.expectEqualStrings("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV", usage_snapshot.pending[0].id);
 }
 
 test "non-http adapter failure drives legacy gateway compatibility bridge" {
@@ -697,6 +739,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         ) anyerror!void {
             try events.emit(.{ .failure = .{
                 .category = .rate_limited,
+                .retryable = true,
                 .detail = "retry later",
                 .retry_after_seconds = 9,
             } });
@@ -711,6 +754,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
     var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     var route = testingRoute("provider:endpoint");
+    var failure_info: ?StreamFailureInfo = null;
     const result = try streamModelRequest(
         .{ .kind = "test", .stream_fn = Fake.stream },
         std.testing.allocator,
@@ -739,6 +783,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         std.testing.allocator,
         .{},
         null,
+        &failure_info,
         .agent,
     );
     defer deinitCollectedCompletion(std.testing.allocator, result.completion);
@@ -747,6 +792,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
     try std.testing.expectEqual(std.http.Status.too_many_requests, result.status);
     try std.testing.expectEqualStrings("retry later", result.err_body.?);
     try std.testing.expectEqual(@as(?u64, 9), result.retry_after_seconds);
+    try std.testing.expect(failure_info.?.retryable);
 }
 
 test "normalized failure state preserves HTTP status and delivery independently" {
@@ -861,6 +907,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
         &usage,
         alloc,
         .{},
+        null,
         null,
         .agent,
     );

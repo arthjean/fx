@@ -1,7 +1,8 @@
 const std = @import("std");
+const agent_stream_provider = @import("../agent/stream_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const diff_mod = @import("../output/diff.zig");
-const gateway_json = @import("../gateway/gateway_json.zig");
+const route_snapshot = @import("../gateway/route_snapshot.zig");
 const gateway_schema = @import("../tooling/gateway_schema.zig");
 const io_mod = @import("../shared/io.zig");
 const permissions = @import("permissions.zig");
@@ -12,7 +13,6 @@ const types = @import("../shared/types.zig");
 pub const tool_name = "permission_decision";
 const max_rationale_bytes: usize = 240;
 const max_review_sends: usize = 2;
-const reviewer_model = "openai/gpt-5.4";
 
 pub const Risk = enum {
     low,
@@ -125,8 +125,71 @@ pub const RootTextBinding = struct {
     text: []const u8,
 };
 
+/// Borrowed effectful edge for one permission review. The route remains
+/// secret-free; credential bytes stay scoped to the already admitted turn.
+pub const AdapterInput = struct {
+    adapter: agent_stream_provider.ProviderAdapter,
+    route: *const route_snapshot.RouteSnapshot,
+    credential: []const u8,
+    tenant: ?[]const u8 = null,
+    cancel_flag: *std.atomic.Value(bool),
+    usage: ?*session_usage.Usage = null,
+    usage_allocator: std.mem.Allocator = std.heap.c_allocator,
+    stream: AccountedStream,
+    trace_ctx: debug_trace.TraceContext = .{},
+};
+
+pub const AccountedCompletion = struct {
+    value: types.GatewayCompletion,
+    context: *anyopaque,
+    deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void,
+
+    pub fn deinit(self: *AccountedCompletion, alloc: std.mem.Allocator) void {
+        self.deinit_fn(self.context, alloc);
+        self.* = undefined;
+    }
+};
+
+pub const AccountedOutcome = union(enum) {
+    completion: AccountedCompletion,
+    transient_failure,
+    permanent_failure,
+    timed_out,
+    cancelled,
+};
+
+pub const AccountedRequest = struct {
+    adapter: agent_stream_provider.ProviderAdapter,
+    route: *const route_snapshot.RouteSnapshot,
+    credential: []const u8,
+    tenant: ?[]const u8,
+    model: []const u8,
+    model_request: agent_stream_provider.ModelRequest,
+    cancel_flag: *std.atomic.Value(bool),
+    usage: ?*session_usage.Usage,
+    usage_allocator: std.mem.Allocator,
+    trace_ctx: debug_trace.TraceContext,
+};
+
+pub const AccountedStream = struct {
+    context: ?*anyopaque = null,
+    stream_fn: *const fn (
+        ?*anyopaque,
+        std.mem.Allocator,
+        AccountedRequest,
+    ) error{OutOfMemory}!AccountedOutcome,
+
+    pub fn stream(
+        self: AccountedStream,
+        alloc: std.mem.Allocator,
+        request: AccountedRequest,
+    ) error{OutOfMemory}!AccountedOutcome {
+        return self.stream_fn(self.context, alloc, request);
+    }
+};
+
 /// Borrowed view of the successful model turn. Every referenced slice must
-/// remain valid until `Reviewer.review` returns.
+/// remain valid until `Classifier.review` returns.
 pub const ReviewTurnContext = struct {
     model: []const u8,
     request_messages: []const types.ChatMessage,
@@ -136,6 +199,7 @@ pub const ReviewTurnContext = struct {
     root_text_bindings: []const RootTextBinding = &.{},
     inherited_root_context: []const u8 = "",
     trusted_permission_feedback: []const []const u8 = &.{},
+    adapter_input: ?AdapterInput = null,
 };
 
 pub const ReviewRequest = struct {
@@ -145,50 +209,6 @@ pub const ReviewRequest = struct {
     action: Action,
     escalation_reason: []const u8,
     phase: ReviewPhase = .initial,
-};
-
-pub const OwnedCompletion = struct {
-    completion: types.GatewayCompletion,
-    context: ?*anyopaque = null,
-    deinit_fn: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
-
-    pub fn deinit(self: *OwnedCompletion, alloc: std.mem.Allocator) void {
-        if (self.context) |context| {
-            if (self.deinit_fn) |deinit_fn| deinit_fn(context, alloc);
-        }
-        self.* = undefined;
-    }
-};
-
-pub const TransportOutcome = union(enum) {
-    completion: OwnedCompletion,
-    transient_failure,
-    permanent_failure,
-    timed_out,
-    cancelled,
-};
-
-pub const Transport = struct {
-    context: *anyopaque,
-    send_fn: *const fn (
-        *anyopaque,
-        std.mem.Allocator,
-        []const u8,
-        []const u8,
-        std.Io.Clock.Timestamp,
-        *std.atomic.Value(bool),
-    ) anyerror!TransportOutcome,
-
-    pub fn send(
-        self: Transport,
-        alloc: std.mem.Allocator,
-        model: []const u8,
-        payload: []const u8,
-        deadline: std.Io.Clock.Timestamp,
-        cancel_flag: *std.atomic.Value(bool),
-    ) !TransportOutcome {
-        return self.send_fn(self.context, alloc, model, payload, deadline, cancel_flag);
-    }
 };
 
 pub const OverrideFn = *const fn (
@@ -223,164 +243,10 @@ pub const Provider = struct {
     review_fn: ProviderFn,
 };
 
-pub const Reviewer = struct {
-    transport: ?Transport = null,
-    override_context: ?*anyopaque = null,
-    override_fn: ?OverrideFn = null,
-    cancel_flag: ?*std.atomic.Value(bool) = null,
-    timeout_ms: u32 = default_timeout_ms,
-
-    pub const default_timeout_ms: u32 = 10_000;
-
-    pub fn disabled() Reviewer {
-        return .{};
-    }
-
-    pub fn withOverride(context: *anyopaque, override_fn: OverrideFn) Reviewer {
-        return .{ .override_context = context, .override_fn = override_fn };
-    }
-
-    pub fn withTransport(
-        transport: Transport,
-        cancel_flag: ?*std.atomic.Value(bool),
-        timeout_ms: u32,
-    ) Reviewer {
-        return .{
-            .transport = transport,
-            .cancel_flag = cancel_flag,
-            .timeout_ms = timeout_ms,
-        };
-    }
-
-    pub fn review(
-        self: Reviewer,
-        alloc: std.mem.Allocator,
-        request: ReviewRequest,
-    ) !ParseOutcome {
-        if (self.override_fn) |override_fn| {
-            return override_fn(
-                self.override_context orelse return .invalid,
-                alloc,
-                request,
-            ) catch |err| switch (err) {
-                error.OutOfMemory, error.Cancelled => return err,
-                else => return .invalid,
-            };
-        }
-        const transport = self.transport orelse return .invalid;
-        var fallback_cancel = std.atomic.Value(bool).init(false);
-        const cancel_flag = self.cancel_flag orelse &fallback_cancel;
-        const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
-            .clock = .awake,
-            .raw = .fromMilliseconds(self.timeout_ms),
-        });
-        checkBudget(deadline, cancel_flag) catch |err| return constructionFailure(err);
-
-        const review_turn = request.review_turn;
-        const started_ms = io_mod.milliTimestamp();
-        debug_trace.logf(
-            "permission",
-            "event=auto_review_compose_start origin={s} source_model={s} reviewer_model={s} request_messages={d} pending_calls={d} root_bindings={d} feedback_items={d} target_call_id={s}",
-            .{
-                @tagName(review_turn.origin),
-                review_turn.model,
-                reviewer_model,
-                review_turn.request_messages.len,
-                review_turn.pending_assistant.tool_calls.len,
-                review_turn.root_text_bindings.len,
-                review_turn.trusted_permission_feedback.len,
-                review_turn.target_call_id,
-            },
-        );
-        if (!validateReviewTurn(review_turn)) {
-            debug_trace.logf(
-                "permission",
-                "event=auto_review_compose_result result=invalid_context elapsed_ms={d} target_call_id={s}",
-                .{ io_mod.milliTimestamp() - started_ms, review_turn.target_call_id },
-            );
-            return .invalid;
-        }
-
-        var evidence = serializeEvidence(alloc, request, deadline, cancel_flag) catch |err| {
-            return constructionFailure(err);
-        };
-        defer evidence.deinit(alloc);
-        if (!evidence.action_complete) return .invalid;
-        checkBudget(deadline, cancel_flag) catch |err| return constructionFailure(err);
-        const tools_json = toolsJsonAlloc(alloc) catch |err| return constructionFailure(err);
-        defer alloc.free(tools_json);
-        checkBudget(deadline, cancel_flag) catch |err| return constructionFailure(err);
-        const instruction = buildReviewInstruction(
-            alloc,
-            review_turn,
-            evidence.text,
-            deadline,
-            cancel_flag,
-        ) catch |err| return constructionFailure(err);
-        defer alloc.free(instruction);
-
-        const messages = alloc.alloc(types.ChatMessage, review_turn.request_messages.len + 2) catch |err| return constructionFailure(err);
-        defer alloc.free(messages);
-        @memcpy(messages[0..review_turn.request_messages.len], review_turn.request_messages);
-        messages[review_turn.request_messages.len] = review_turn.pending_assistant;
-        messages[review_turn.request_messages.len + 1] = .{ .role = .system, .content = instruction };
-
-        const payload = gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
-            alloc,
-            tools_json,
-            messages,
-            review_turn.target_call_id,
-            .{},
-            2048,
-            deadline,
-            cancel_flag,
-        ) catch |err| return constructionFailure(err);
-        defer alloc.free(payload);
-        debug_trace.logf(
-            "permission",
-            "event=auto_review_compose_result result=ready payload_bytes={d} elapsed_ms={d} target_call_id={s}",
-            .{ payload.len, io_mod.milliTimestamp() - started_ms, review_turn.target_call_id },
-        );
-
-        var send_count: usize = 0;
-        while (send_count < max_review_sends) : (send_count += 1) {
-            checkBudget(deadline, cancel_flag) catch |err| return constructionFailure(err);
-            debug_trace.logf(
-                "permission",
-                "event=auto_review_send attempt={d} max_attempts={d} target_call_id={s}",
-                .{ send_count + 1, max_review_sends, review_turn.target_call_id },
-            );
-            var transport_outcome = transport.send(
-                alloc,
-                reviewer_model,
-                payload,
-                deadline,
-                cancel_flag,
-            ) catch |err| switch (err) {
-                error.OutOfMemory, error.Cancelled => return err,
-                else => return .invalid,
-            };
-            switch (transport_outcome) {
-                .cancelled => return error.Cancelled,
-                .timed_out, .permanent_failure => return .invalid,
-                .transient_failure => {},
-                .completion => |*owned| {
-                    defer owned.deinit(alloc);
-                    const parsed = try parseCompletion(alloc, owned.completion);
-                    switch (parsed) {
-                        .valid => return parsed,
-                        .invalid => {},
-                    }
-                },
-            }
-        }
-        return .invalid;
-    }
-};
-
 /// One injected automatic-review capability. Provider and override state are
 /// borrowed and used synchronously by `review`.
 pub const Classifier = struct {
+    adapter_input: ?AdapterInput = null,
     provider: ?Provider = null,
     provider_input: ProviderInput = .{},
     override_ctx: ?*anyopaque = null,
@@ -397,6 +263,10 @@ pub const Classifier = struct {
         };
     }
 
+    pub fn withAdapter(input: AdapterInput) Classifier {
+        return .{ .adapter_input = input };
+    }
+
     pub fn withOverride(ctx: *anyopaque, review_fn: OverrideFn) Classifier {
         return .{
             .override_ctx = ctx,
@@ -405,7 +275,7 @@ pub const Classifier = struct {
     }
 
     pub fn enabled(self: Classifier) bool {
-        return self.override_fn != null or self.provider != null;
+        return self.override_fn != null or self.adapter_input != null or self.provider != null;
     }
 
     pub fn review(
@@ -414,10 +284,18 @@ pub const Classifier = struct {
         request: ReviewRequest,
     ) error{ OutOfMemory, Cancelled }!ParseOutcome {
         if (self.override_fn) |review_fn| {
-            return Reviewer.withOverride(
+            return review_fn(
                 self.override_ctx orelse return .invalid,
-                review_fn,
-            ).review(alloc, request) catch |err| switch (err) {
+                alloc,
+                request,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Cancelled => return error.Cancelled,
+                else => return .invalid,
+            };
+        }
+        if (self.adapter_input) |input| {
+            return reviewWithAdapter(alloc, input, request) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Cancelled => return error.Cancelled,
                 else => return .invalid,
@@ -436,6 +314,151 @@ pub const Classifier = struct {
         };
     }
 };
+
+pub const default_timeout_ms: u32 = 10_000;
+
+fn reviewWithAdapter(
+    alloc: std.mem.Allocator,
+    input: AdapterInput,
+    request: ReviewRequest,
+) !ParseOutcome {
+    const reviewer_model = input.route.permission_review_model_id orelse return .invalid;
+    if (!input.adapter.acceptsRoute(input.route) or
+        !input.route.containsModel(reviewer_model)) return .invalid;
+
+    const review_turn = request.review_turn;
+    const started_ms = io_mod.milliTimestamp();
+    debug_trace.logf(
+        "permission",
+        "event=auto_review_compose_start origin={s} source_model={s} reviewer_model={s} connection_id={s} request_messages={d} pending_calls={d} root_bindings={d} feedback_items={d} target_call_id={s}",
+        .{
+            @tagName(review_turn.origin),
+            review_turn.model,
+            reviewer_model,
+            input.route.connection_id,
+            review_turn.request_messages.len,
+            review_turn.pending_assistant.tool_calls.len,
+            review_turn.root_text_bindings.len,
+            review_turn.trusted_permission_feedback.len,
+            review_turn.target_call_id,
+        },
+    );
+    if (!validateReviewTurn(review_turn)) return .invalid;
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(default_timeout_ms),
+    });
+    checkBudget(deadline, input.cancel_flag) catch |err| return constructionFailure(err);
+    var evidence = serializeEvidence(alloc, request, deadline, input.cancel_flag) catch |err|
+        return constructionFailure(err);
+    defer evidence.deinit(alloc);
+    if (!evidence.action_complete) return .invalid;
+    const tools_json = toolsJsonAlloc(alloc) catch |err| return constructionFailure(err);
+    defer alloc.free(tools_json);
+    const instruction = buildReviewInstruction(
+        alloc,
+        review_turn,
+        evidence.text,
+        deadline,
+        input.cancel_flag,
+    ) catch |err| return constructionFailure(err);
+    defer alloc.free(instruction);
+    const messages = composeReviewMessages(
+        alloc,
+        review_turn,
+        instruction,
+    ) catch |err| return constructionFailure(err);
+    defer alloc.free(messages);
+    debug_trace.logf(
+        "permission",
+        "event=auto_review_compose_result result=ready elapsed_ms={d} target_call_id={s}",
+        .{ io_mod.milliTimestamp() - started_ms, review_turn.target_call_id },
+    );
+
+    var send_count: usize = 0;
+    while (send_count < max_review_sends) : (send_count += 1) {
+        checkBudget(deadline, input.cancel_flag) catch |err| return constructionFailure(err);
+        debug_trace.logf(
+            "permission",
+            "event=auto_review_send attempt={d} max_attempts={d} target_call_id={s}",
+            .{ send_count + 1, max_review_sends, review_turn.target_call_id },
+        );
+        var outcome = try input.stream.stream(alloc, .{
+            .adapter = input.adapter,
+            .route = input.route,
+            .credential = input.credential,
+            .tenant = input.tenant,
+            .model = reviewer_model,
+            .model_request = .{
+                .serialized_tools = tools_json,
+                .messages = messages,
+                .tool_choice = .auto,
+                .require_tool_call = true,
+                .capabilities = .{ .supports_tool_use = true },
+                .max_output_tokens = 2048,
+                .budget = .{
+                    .deadline = deadline,
+                    .cancel_flag = input.cancel_flag,
+                },
+            },
+            .cancel_flag = input.cancel_flag,
+            .usage = input.usage,
+            .usage_allocator = input.usage_allocator,
+            .trace_ctx = input.trace_ctx,
+        });
+        switch (outcome) {
+            .cancelled => return error.Cancelled,
+            .permanent_failure, .timed_out => return .invalid,
+            .transient_failure => continue,
+            .completion => |*completion| {
+                defer completion.deinit(alloc);
+                if (input.cancel_flag.load(.seq_cst)) return error.Cancelled;
+                if (completion.value.finish_reason) |reason| switch (reason) {
+                    .provider_error => continue,
+                    .content_filter => return .invalid,
+                    .stop, .length, .tool_calls, .other => {},
+                };
+                if (completion.value.content) |content| {
+                    if (std.mem.trim(u8, content, " \t\r\n").len > 0) continue;
+                }
+                var parsed = try parseCompletion(alloc, completion.value);
+                if (parsed == .valid) return parsed;
+                parsed.deinit(alloc);
+            },
+        }
+    }
+    return .invalid;
+}
+
+fn composeReviewMessages(
+    alloc: std.mem.Allocator,
+    turn: ReviewTurnContext,
+    instruction: []const u8,
+) ![]types.ChatMessage {
+    const pending_results = turn.pending_assistant.tool_calls.len;
+    const total = try std.math.add(
+        usize,
+        turn.request_messages.len + 2,
+        pending_results,
+    );
+    const messages = try alloc.alloc(types.ChatMessage, total);
+    @memcpy(messages[0..turn.request_messages.len], turn.request_messages);
+    var index = turn.request_messages.len;
+    messages[index] = turn.pending_assistant;
+    index += 1;
+    for (turn.pending_assistant.tool_calls) |call| {
+        messages[index] = .{
+            .role = .tool,
+            .content = "Tool call has not executed; it is pending permission review.",
+            .tool_call_id = call.id,
+            .tool_name = call.name,
+        };
+        index += 1;
+    }
+    messages[index] = .{ .role = .system, .content = instruction };
+    return messages;
+}
 
 const max_action_field_bytes: usize = 64 * 1024;
 const max_context_bytes: usize = 8 * 1024;
@@ -956,7 +979,7 @@ test "automatic review schema is strict and has no confidence field" {
 }
 
 test "automatic reviewer defaults to the tested ten second budget" {
-    try std.testing.expectEqual(@as(u32, 10_000), Reviewer.default_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 10_000), default_timeout_ms);
 }
 
 test "automatic reviewer classifier routes through the registered provider" {
@@ -1006,6 +1029,216 @@ test "automatic reviewer classifier routes through the registered provider" {
 
     try std.testing.expectEqual(std.meta.Tag(ParseOutcome).invalid, std.meta.activeTag(outcome));
     try std.testing.expect(state.saw_input);
+}
+
+test "missing or unsupported pinned reviewer returns invalid without adapter traffic" {
+    const Counter = struct {
+        calls: usize = 0,
+
+        fn stream(
+            adapter: *const agent_stream_provider.ProviderAdapter,
+            _: std.mem.Allocator,
+            _: agent_stream_provider.AdapterRequest,
+            _: agent_stream_provider.EventSink,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(adapter.context.?));
+            self.calls += 1;
+        }
+
+        fn accounted(
+            raw: ?*anyopaque,
+            _: std.mem.Allocator,
+            _: AccountedRequest,
+        ) error{OutOfMemory}!AccountedOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .permanent_failure;
+        }
+    };
+
+    var counter = Counter{};
+    const adapter = agent_stream_provider.ProviderAdapter{
+        .kind = "loopback",
+        .context = &counter,
+        .stream_fn = Counter.stream,
+    };
+    var route = route_snapshot.RouteSnapshot{
+        .connection_id = "connection-a",
+        .adapter_kind = "loopback",
+        .endpoint = "http://127.0.0.1/a",
+        .protocol = "loopback",
+        .credential_ref = "key-a",
+        .primary_model_id = "primary-a",
+        .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = "primary-a",
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    var cancel = std.atomic.Value(bool).init(false);
+    const request = ReviewRequest{
+        .workspace_root = "/tmp/workspace",
+        .review_turn = .{
+            .model = "primary-a",
+            .request_messages = &.{},
+            .pending_assistant = .{ .role = .assistant },
+            .target_call_id = "call-1",
+            .origin = .root,
+        },
+        .targets = &.{},
+        .action = .{ .tool = .{
+            .tool_name = "run_command",
+            .arguments_json = "{}",
+        } },
+        .escalation_reason = "test",
+    };
+
+    const missing = try Classifier.withAdapter(.{
+        .adapter = adapter,
+        .route = &route,
+        .credential = "credential-a",
+        .cancel_flag = &cancel,
+        .stream = .{ .context = &counter, .stream_fn = Counter.accounted },
+    }).review(std.testing.allocator, request);
+    try std.testing.expectEqual(std.meta.Tag(ParseOutcome).invalid, std.meta.activeTag(missing));
+
+    route.permission_review_model_id = "reviewer-a";
+    route.adapter_kind = "unsupported";
+    const unsupported = try Classifier.withAdapter(.{
+        .adapter = adapter,
+        .route = &route,
+        .credential = "credential-a",
+        .cancel_flag = &cancel,
+        .stream = .{ .context = &counter, .stream_fn = Counter.accounted },
+    }).review(std.testing.allocator, request);
+    try std.testing.expectEqual(std.meta.Tag(ParseOutcome).invalid, std.meta.activeTag(unsupported));
+    try std.testing.expectEqual(@as(usize, 0), counter.calls);
+}
+
+test "accounted reviewer stops permanent and cancellation while bounding transient retries" {
+    const Fixture = struct {
+        const Outcome = enum { permanent, transient, timed_out, cancelled, content_filter };
+        const CompletionOwner = struct {};
+
+        outcome: Outcome,
+        calls: usize = 0,
+
+        fn adapterStream(
+            _: *const agent_stream_provider.ProviderAdapter,
+            _: std.mem.Allocator,
+            _: agent_stream_provider.AdapterRequest,
+            _: agent_stream_provider.EventSink,
+        ) anyerror!void {}
+
+        fn deinitCompletion(raw: *anyopaque, alloc: std.mem.Allocator) void {
+            const owner: *CompletionOwner = @ptrCast(@alignCast(raw));
+            alloc.destroy(owner);
+        }
+
+        fn stream(
+            raw: ?*anyopaque,
+            alloc: std.mem.Allocator,
+            request: AccountedRequest,
+        ) error{OutOfMemory}!AccountedOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            if (!std.mem.eql(u8, request.model, "reviewer-a")) return .permanent_failure;
+            return switch (self.outcome) {
+                .permanent => .permanent_failure,
+                .transient => .transient_failure,
+                .timed_out => .timed_out,
+                .cancelled => .cancelled,
+                .content_filter => blk: {
+                    const owner = try alloc.create(CompletionOwner);
+                    break :blk .{ .completion = .{
+                        .value = .{ .finish_reason = .content_filter },
+                        .context = owner,
+                        .deinit_fn = deinitCompletion,
+                    } };
+                },
+            };
+        }
+    };
+
+    const route = route_snapshot.RouteSnapshot{
+        .connection_id = "connection-a",
+        .adapter_kind = "loopback",
+        .endpoint = "http://127.0.0.1/a",
+        .protocol = "loopback",
+        .credential_ref = "key-a",
+        .primary_model_id = "primary-a",
+        .permission_review_model_id = "reviewer-a",
+        .vision_model_id = null,
+        .subagent_model_id = "primary-a",
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    const adapter = agent_stream_provider.ProviderAdapter{
+        .kind = "loopback",
+        .stream_fn = Fixture.adapterStream,
+    };
+    const pending = types.ChatMessage{
+        .role = .assistant,
+        .tool_calls = &.{.{
+            .id = "call-1",
+            .name = "run_command",
+            .arguments_json = "{\"command\":\"pwd\"}",
+        }},
+    };
+    const request = ReviewRequest{
+        .workspace_root = "/tmp/workspace",
+        .review_turn = .{
+            .model = "primary-a",
+            .request_messages = &.{.{ .role = .user, .content = "Inspect this workspace." }},
+            .pending_assistant = pending,
+            .target_call_id = "call-1",
+            .origin = .root,
+            .root_text_bindings = &.{.{
+                .message_index = 0,
+                .text = "Inspect this workspace.",
+            }},
+        },
+        .targets = &.{},
+        .action = .{ .tool = .{
+            .tool_name = "run_command",
+            .arguments_json = "{\"command\":\"pwd\"}",
+        } },
+        .escalation_reason = "test",
+    };
+    var cancel = std.atomic.Value(bool).init(false);
+
+    inline for (.{
+        .{ Fixture.Outcome.permanent, @as(usize, 1) },
+        .{ Fixture.Outcome.timed_out, @as(usize, 1) },
+        .{ Fixture.Outcome.content_filter, @as(usize, 1) },
+        .{ Fixture.Outcome.transient, @as(usize, 2) },
+    }) |case| {
+        var fixture = Fixture{ .outcome = case[0] };
+        var outcome = try Classifier.withAdapter(.{
+            .adapter = adapter,
+            .route = &route,
+            .credential = "credential-a",
+            .cancel_flag = &cancel,
+            .stream = .{ .context = &fixture, .stream_fn = Fixture.stream },
+        }).review(std.testing.allocator, request);
+        defer outcome.deinit(std.testing.allocator);
+        try std.testing.expect(outcome == .invalid);
+        try std.testing.expectEqual(case[1], fixture.calls);
+    }
+
+    var cancelled = Fixture{ .outcome = .cancelled };
+    try std.testing.expectError(error.Cancelled, Classifier.withAdapter(.{
+        .adapter = adapter,
+        .route = &route,
+        .credential = "credential-a",
+        .cancel_flag = &cancel,
+        .stream = .{ .context = &cancelled, .stream_fn = Fixture.stream },
+    }).review(std.testing.allocator, request));
+    try std.testing.expectEqual(@as(usize, 1), cancelled.calls);
 }
 
 test "automatic review policy matches the tested XML v1 artifact" {
@@ -1110,79 +1343,6 @@ test "automatic review rejects malformed extra and legacy deny assessments" {
             std.meta.activeTag(try parseCompletion(std.testing.allocator, completion)),
         );
     }
-}
-
-test "automatic review does not send redacted action evidence" {
-    const FakeTransport = struct {
-        calls: usize = 0,
-        saw_redaction: bool = false,
-        saw_secret: bool = false,
-
-        fn send(
-            raw_ctx: *anyopaque,
-            _: std.mem.Allocator,
-            _: []const u8,
-            payload: []const u8,
-            _: std.Io.Clock.Timestamp,
-            _: *std.atomic.Value(bool),
-        ) anyerror!TransportOutcome {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.calls += 1;
-            self.saw_redaction = self.saw_redaction or
-                std.mem.find(u8, payload, "[redacted]") != null;
-            self.saw_secret = self.saw_secret or
-                std.mem.find(u8, payload, "super-secret") != null;
-            return .{ .completion = .{ .completion = .{
-                .tool_calls = &.{.{
-                    .id = "review",
-                    .name = tool_name,
-                    .arguments_json = "{\"risk\":\"low\",\"authorization\":\"medium\",\"decision\":\"allow\",\"rationale\":\"safe\"}",
-                }},
-            } } };
-        }
-    };
-
-    var fake = FakeTransport{};
-    const reviewer = Reviewer.withTransport(.{
-        .context = @ptrCast(&fake),
-        .send_fn = FakeTransport.send,
-    }, null, 1000);
-    const pending_assistant = types.ChatMessage{
-        .role = .assistant,
-        .tool_calls = &.{.{
-            .id = "call_secret",
-            .name = "run_command",
-            .arguments_json = "{\"command\":\"printf API_KEY=super-secret\"}",
-        }},
-    };
-    const outcome = try reviewer.review(std.testing.allocator, .{
-        .workspace_root = "/tmp/workspace",
-        .review_turn = .{
-            .model = "openai/gpt-5",
-            .request_messages = &.{.{ .role = .user, .content = "Run the requested command." }},
-            .pending_assistant = pending_assistant,
-            .target_call_id = "call_secret",
-            .origin = .root,
-            .root_text_bindings = &.{.{
-                .message_index = 0,
-                .text = "Run the requested command.",
-            }},
-        },
-        .targets = &.{},
-        .action = .{ .command = .{
-            .command = "printf API_KEY=super-secret",
-            .resolved_cwd = "/tmp/workspace",
-            .background = false,
-            .backend = .none,
-            .target_os = .linux,
-        } },
-        .escalation_reason = "command_requires_approval",
-    });
-
-    try std.testing.expectEqual(std.meta.Tag(ParseOutcome).invalid, std.meta.activeTag(outcome));
-    try std.testing.expectEqual(@as(usize, 0), fake.calls);
-    try std.testing.expect(!fake.saw_redaction);
-    try std.testing.expect(!fake.saw_secret);
 }
 
 test "automatic review preserves prepared file lines within its evidence byte budget" {
@@ -1291,56 +1451,7 @@ test "automatic review fails closed when prepared file evidence exceeds its byte
     try std.testing.expect(std.mem.find(u8, evidence.text, "review_omitted_rows:") != null);
 }
 
-test "automatic review serializes the pending call structurally" {
-    const FakeTransport = struct {
-        saw_pending_assistant: bool = false,
-        saw_pending_results: bool = false,
-        saw_reviewer_model: bool = false,
-        saw_review_settings: bool = false,
-        saw_message_order: bool = false,
-
-        fn send(
-            raw_ctx: *anyopaque,
-            _: std.mem.Allocator,
-            model: []const u8,
-            payload: []const u8,
-            _: std.Io.Clock.Timestamp,
-            _: *std.atomic.Value(bool),
-        ) anyerror!TransportOutcome {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.saw_pending_assistant =
-                std.mem.find(u8, payload, "\"role\":\"assistant\"") != null and
-                std.mem.find(u8, payload, "\"toolCallId\":\"call_install\"") != null and
-                std.mem.find(u8, payload, "\"toolCallId\":\"call_read\"") != null;
-            self.saw_pending_results =
-                std.mem.count(u8, payload, "\"role\":\"tool\"") == 2 and
-                std.mem.count(u8, payload, "Tool call has not executed; it is pending permission review.") == 2;
-            self.saw_reviewer_model = std.mem.eql(u8, model, reviewer_model);
-            self.saw_review_settings =
-                std.mem.find(u8, payload, "\"maxOutputTokens\":2048") != null and
-                std.mem.find(u8, payload, "\"toolChoice\":{\"type\":\"required\"}") != null and
-                std.mem.find(u8, payload, "\"providerOptions\"") == null and
-                std.mem.find(u8, payload, "\"name\":\"permission_decision\"") != null;
-            const user_index = std.mem.find(u8, payload, "Please run pnpm install.") orelse return error.TestExpectedReviewOrder;
-            const assistant_index = std.mem.find(u8, payload, "\"role\":\"assistant\"") orelse return error.TestExpectedReviewOrder;
-            const result_index = std.mem.find(u8, payload, "\"role\":\"tool\"") orelse return error.TestExpectedReviewOrder;
-            const instruction_index = std.mem.find(u8, payload, "<permission_review>") orelse return error.TestExpectedReviewOrder;
-            self.saw_message_order = user_index < assistant_index and assistant_index < result_index and result_index < instruction_index;
-            return .{ .completion = .{ .completion = .{
-                .tool_calls = &.{.{
-                    .id = "review",
-                    .name = tool_name,
-                    .arguments_json = "{\"risk\":\"medium\",\"authorization\":\"high\",\"decision\":\"allow\",\"rationale\":\"User requested the install.\"}",
-                }},
-            } } };
-        }
-    };
-
-    var fake = FakeTransport{};
-    const reviewer = Reviewer.withTransport(.{
-        .context = @ptrCast(&fake),
-        .send_fn = FakeTransport.send,
-    }, null, 1000);
+test "automatic review closes pending calls before its instruction" {
     const request_messages = [_]types.ChatMessage{
         .{ .role = .system, .content = "Repository context." },
         .{ .role = .user, .content = "Please run pnpm install." },
@@ -1360,36 +1471,27 @@ test "automatic review serializes the pending call structurally" {
             },
         },
     };
-    var outcome = try reviewer.review(std.testing.allocator, .{
-        .workspace_root = "/tmp/workspace",
-        .review_turn = .{
-            .model = "openai/gpt-5",
-            .request_messages = &request_messages,
-            .pending_assistant = pending_assistant,
-            .target_call_id = "call_install",
-            .origin = .root,
-            .root_text_bindings = &.{.{
-                .message_index = 1,
-                .text = "Please run pnpm install.",
-            }},
-        },
-        .targets = &.{},
-        .action = .{ .command = .{
-            .command = "pnpm install",
-            .resolved_cwd = "/tmp/workspace",
-            .background = false,
-            .backend = .none,
-            .target_os = .linux,
-        } },
-        .escalation_reason = "command_requires_approval",
-    });
-    defer outcome.deinit(std.testing.allocator);
+    const messages = try composeReviewMessages(std.testing.allocator, .{
+        .model = "openai/gpt-5",
+        .request_messages = &request_messages,
+        .pending_assistant = pending_assistant,
+        .target_call_id = "call_install",
+        .origin = .root,
+        .root_text_bindings = &.{.{
+            .message_index = 1,
+            .text = "Please run pnpm install.",
+        }},
+    }, "review instruction");
+    defer std.testing.allocator.free(messages);
 
-    try std.testing.expect(fake.saw_pending_assistant);
-    try std.testing.expect(fake.saw_pending_results);
-    try std.testing.expect(fake.saw_reviewer_model);
-    try std.testing.expect(fake.saw_review_settings);
-    try std.testing.expect(fake.saw_message_order);
+    try std.testing.expectEqual(@as(usize, 6), messages.len);
+    try std.testing.expectEqual(types.ChatRole.assistant, messages[2].role);
+    try std.testing.expectEqual(types.ChatRole.tool, messages[3].role);
+    try std.testing.expectEqualStrings("call_install", messages[3].tool_call_id.?);
+    try std.testing.expectEqual(types.ChatRole.tool, messages[4].role);
+    try std.testing.expectEqualStrings("call_read", messages[4].tool_call_id.?);
+    try std.testing.expectEqual(types.ChatRole.system, messages[5].role);
+    try std.testing.expectEqualStrings("review instruction", messages[5].content.?);
 }
 
 test "review turn validation admits only bounded root text or inherited root authority" {
@@ -1502,56 +1604,4 @@ test "review turn validation rejects ambiguous provenance and target identity" {
         .origin = .root,
         .root_text_bindings = &.{.{ .message_index = 1, .text = "Run the command." }},
     }));
-}
-
-test "expired review budget fails closed before transport" {
-    const FakeTransport = struct {
-        calls: usize = 0,
-
-        fn send(
-            raw_ctx: *anyopaque,
-            _: std.mem.Allocator,
-            _: []const u8,
-            _: []const u8,
-            _: std.Io.Clock.Timestamp,
-            _: *std.atomic.Value(bool),
-        ) anyerror!TransportOutcome {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.calls += 1;
-            return .permanent_failure;
-        }
-    };
-
-    var fake = FakeTransport{};
-    const reviewer = Reviewer.withTransport(.{
-        .context = @ptrCast(&fake),
-        .send_fn = FakeTransport.send,
-    }, null, 0);
-    const outcome = try reviewer.review(std.testing.allocator, .{
-        .workspace_root = "/tmp/workspace",
-        .review_turn = .{
-            .model = "openai/gpt-5",
-            .request_messages = &.{.{ .role = .user, .content = "Run this." }},
-            .pending_assistant = .{ .role = .assistant, .tool_calls = &.{.{
-                .id = "target",
-                .name = "run_command",
-                .arguments_json = "{}",
-            }} },
-            .target_call_id = "target",
-            .origin = .root,
-            .root_text_bindings = &.{.{ .message_index = 0, .text = "Run this." }},
-        },
-        .targets = &.{},
-        .action = .{ .command = .{
-            .command = "true",
-            .resolved_cwd = "/tmp/workspace",
-            .background = false,
-            .backend = .none,
-            .target_os = .linux,
-        } },
-        .escalation_reason = "command_requires_approval",
-    });
-
-    try std.testing.expectEqual(std.meta.Tag(ParseOutcome).invalid, std.meta.activeTag(outcome));
-    try std.testing.expectEqual(@as(usize, 0), fake.calls);
 }

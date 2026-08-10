@@ -8,6 +8,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Route authority for sessions written before connection identities existed.
 pub const legacy_connection_id = "vercel";
+const legacy_vision_model_id = "google/gemini-2.5-flash";
 
 pub const DurableSessionPreferences = struct {
     /// Null only while reading a model-only session written before G5.
@@ -46,11 +47,15 @@ pub const RecoveryRouteIdentity = struct {
     connection_id: []u8,
     adapter_kind: []u8,
     permission_review_model_id: ?[]u8,
+    vision_model_id: ?[]u8,
+    subagent_model_id: []u8,
 
     pub fn deinit(self: *RecoveryRouteIdentity, alloc: Allocator) void {
         alloc.free(self.connection_id);
         alloc.free(self.adapter_kind);
         if (self.permission_review_model_id) |model| alloc.free(model);
+        if (self.vision_model_id) |model| alloc.free(model);
+        alloc.free(self.subagent_model_id);
         self.* = undefined;
     }
 
@@ -63,10 +68,18 @@ pub const RecoveryRouteIdentity = struct {
             try alloc.dupe(u8, model)
         else
             null;
+        errdefer if (permission_review_model_id) |model| alloc.free(model);
+        const vision_model_id = if (self.vision_model_id) |model|
+            try alloc.dupe(u8, model)
+        else
+            null;
+        errdefer if (vision_model_id) |model| alloc.free(model);
         return .{
             .connection_id = connection_id,
             .adapter_kind = adapter_kind,
             .permission_review_model_id = permission_review_model_id,
+            .vision_model_id = vision_model_id,
+            .subagent_model_id = try alloc.dupe(u8, self.subagent_model_id),
         };
     }
 };
@@ -75,6 +88,7 @@ pub const LegacyRouteDefaults = struct {
     connection_id: []const u8,
     adapter_kind: []const u8,
     permission_review_model_id: ?[]const u8,
+    vision_model_id: ?[]const u8 = legacy_vision_model_id,
 };
 
 pub const RecoveryToolState = enum {
@@ -165,9 +179,16 @@ pub fn migrateLegacyRouteState(
             if (!std.mem.eql(u8, state.preferences.connection_id.?, defaults.connection_id)) {
                 return error.InvalidDurableField;
             }
-            checkpoint.route_identity = try dupeLegacyRouteIdentity(alloc, defaults);
-            checkpoint.version = 2;
+            checkpoint.route_identity = try dupeLegacyRouteIdentity(
+                alloc,
+                defaults,
+                checkpoint.route_model,
+            );
+            checkpoint.version = 3;
             checkpoint.delivery = .possibly_sent;
+            changed = true;
+        } else if (checkpoint.version == 2) {
+            checkpoint.version = 3;
             changed = true;
         }
     }
@@ -178,6 +199,7 @@ pub fn migrateLegacyRouteState(
 fn dupeLegacyRouteIdentity(
     alloc: Allocator,
     defaults: LegacyRouteDefaults,
+    subagent_model_id: []const u8,
 ) !RecoveryRouteIdentity {
     const connection_id = try alloc.dupe(u8, defaults.connection_id);
     errdefer alloc.free(connection_id);
@@ -187,10 +209,18 @@ fn dupeLegacyRouteIdentity(
         try alloc.dupe(u8, model)
     else
         null;
+    errdefer if (permission_review_model_id) |model| alloc.free(model);
+    const vision_model_id = if (defaults.vision_model_id) |model|
+        try alloc.dupe(u8, model)
+    else
+        null;
+    errdefer if (vision_model_id) |model| alloc.free(model);
     return .{
         .connection_id = connection_id,
         .adapter_kind = adapter_kind,
         .permission_review_model_id = permission_review_model_id,
+        .vision_model_id = vision_model_id,
+        .subagent_model_id = try alloc.dupe(u8, subagent_model_id),
     };
 }
 
@@ -590,7 +620,7 @@ pub fn validateState(state: DurableSessionState) !void {
     }
     if (state.usage) |usage| try session_usage.validateSnapshot(usage);
     if (state.recovery_checkpoint) |checkpoint| {
-        if ((checkpoint.version != 1 and checkpoint.version != 2) or
+        if ((checkpoint.version != 1 and checkpoint.version != 2 and checkpoint.version != 3) or
             checkpoint.turn_id == 0 or
             checkpoint.max_provider_attempts == 0 or
             checkpoint.consumed_provider_attempts > checkpoint.max_provider_attempts or
@@ -603,7 +633,7 @@ pub fn validateState(state: DurableSessionState) !void {
         switch (checkpoint.version) {
             1 => if (checkpoint.route_identity != null or state.preferences.connection_id != null)
                 return error.InvalidDurableField,
-            2 => {
+            2, 3 => {
                 const identity = checkpoint.route_identity orelse return error.InvalidDurableField;
                 const preference_connection = state.preferences.connection_id orelse
                     return error.InvalidDurableField;
@@ -613,6 +643,8 @@ pub fn validateState(state: DurableSessionState) !void {
                     return error.InvalidDurableField;
                 }
                 if (identity.permission_review_model_id) |model| try validateModel(model);
+                if (identity.vision_model_id) |model| try validateModel(model);
+                try validateModel(identity.subagent_model_id);
             },
             else => unreachable,
         }
@@ -621,7 +653,7 @@ pub fn validateState(state: DurableSessionState) !void {
 
 fn validateWritableState(state: DurableSessionState) !void {
     if (state.recovery_checkpoint) |checkpoint| {
-        if (checkpoint.version != 2) return error.LegacySessionRequiresMigration;
+        if (checkpoint.version != 3) return error.LegacySessionRequiresMigration;
     }
 }
 
@@ -681,7 +713,7 @@ fn writeState(writer: *std.Io.Writer, state: DurableSessionState) !void {
 }
 
 pub fn writeRecoveryCheckpoint(writer: *std.Io.Writer, checkpoint: RecoveryCheckpoint) !void {
-    if (checkpoint.version != 2) return error.LegacySessionRequiresMigration;
+    if (checkpoint.version != 3) return error.LegacySessionRequiresMigration;
     const identity = checkpoint.route_identity orelse return error.InvalidDurableField;
     try writer.print("{{\"version\":{d},\"route_identity\":{{\"connection_id\":", .{
         checkpoint.version,
@@ -695,6 +727,14 @@ pub fn writeRecoveryCheckpoint(writer: *std.Io.Writer, checkpoint: RecoveryCheck
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"vision_model_id\":");
+    if (identity.vision_model_id) |model| {
+        try writeJsonString(writer, model);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"subagent_model_id\":");
+    try writeJsonString(writer, identity.subagent_model_id);
     try writer.writeAll("},\"delivery\":");
     try writeJsonString(writer, @tagName(checkpoint.delivery));
     try writer.print(",\"turn_id\":{d},\"user\":", .{checkpoint.turn_id});
@@ -913,12 +953,17 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
     const object = switch (version) {
         1 => try exactObject(value, v1_keys),
         2 => try exactObject(value, v2_keys),
+        3 => try exactObject(value, v2_keys),
         else => return error.InvalidDurableField,
     };
-    const route_identity = if (version == 2)
+    const route_model = try parseDurableBytes(alloc, object.get("route_model") orelse return error.InvalidSessionFormat);
+    errdefer alloc.free(route_model);
+    const route_identity = if (version >= 2)
         try parseRecoveryRouteIdentity(
             alloc,
             object.get("route_identity") orelse return error.InvalidSessionFormat,
+            @intCast(version),
+            route_model,
         )
     else
         null;
@@ -932,8 +977,6 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
     errdefer alloc.free(assistant_source);
     const execution = try parseExecutionMemory(alloc, object.get("execution") orelse return error.InvalidSessionFormat);
     errdefer session.freeExecutionMemory(alloc, execution);
-    const route_model = try parseDurableBytes(alloc, object.get("route_model") orelse return error.InvalidSessionFormat);
-    errdefer alloc.free(route_model);
     const max_provider_attempts = std.math.cast(usize, try requireU64(object, "max_provider_attempts")) orelse
         return error.InvalidDurableField;
     const consumed_provider_attempts = std.math.cast(usize, try requireU64(object, "consumed_provider_attempts")) orelse
@@ -941,7 +984,7 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
     return .{
         .version = @intCast(version),
         .route_identity = route_identity,
-        .delivery = if (version == 2)
+        .delivery = if (version >= 2)
             std.meta.stringToEnum(RecoveryDelivery, try requireString(object, "delivery")) orelse
                 return error.InvalidDurableField
         else
@@ -965,15 +1008,33 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
     };
 }
 
-fn parseRecoveryRouteIdentity(alloc: Allocator, value: std.json.Value) !RecoveryRouteIdentity {
-    const object = try exactObject(value, &.{
-        "connection_id",
-        "adapter_kind",
-        "permission_review_model_id",
-    });
+fn parseRecoveryRouteIdentity(
+    alloc: Allocator,
+    value: std.json.Value,
+    version: u8,
+    route_model: []const u8,
+) !RecoveryRouteIdentity {
+    const object = if (version == 2)
+        try exactObject(value, &.{
+            "connection_id",
+            "adapter_kind",
+            "permission_review_model_id",
+        })
+    else
+        try exactObject(value, &.{
+            "connection_id",
+            "adapter_kind",
+            "permission_review_model_id",
+            "vision_model_id",
+            "subagent_model_id",
+        });
+    const adapter_kind_raw = try requireString(object, "adapter_kind");
+    if (version == 2 and !std.mem.eql(u8, adapter_kind_raw, "vercel_ai_gateway")) {
+        return error.InvalidDurableField;
+    }
     const connection_id = try alloc.dupe(u8, try requireString(object, "connection_id"));
     errdefer alloc.free(connection_id);
-    const adapter_kind = try alloc.dupe(u8, try requireString(object, "adapter_kind"));
+    const adapter_kind = try alloc.dupe(u8, adapter_kind_raw);
     errdefer alloc.free(adapter_kind);
     const reviewer_value = object.get("permission_review_model_id") orelse
         return error.InvalidSessionFormat;
@@ -982,10 +1043,31 @@ fn parseRecoveryRouteIdentity(alloc: Allocator, value: std.json.Value) !Recovery
         .string => |model| try alloc.dupe(u8, model),
         else => return error.InvalidSessionFormat,
     };
+    errdefer if (permission_review_model_id) |model| alloc.free(model);
+    const vision_model_id = if (version == 2)
+        try alloc.dupe(u8, legacy_vision_model_id)
+    else blk: {
+        const vision_value = object.get("vision_model_id") orelse
+            return error.InvalidSessionFormat;
+        break :blk switch (vision_value) {
+            .null => null,
+            .string => |model| try alloc.dupe(u8, model),
+            else => return error.InvalidSessionFormat,
+        };
+    };
+    errdefer if (vision_model_id) |model| alloc.free(model);
     return .{
         .connection_id = connection_id,
         .adapter_kind = adapter_kind,
         .permission_review_model_id = permission_review_model_id,
+        .vision_model_id = vision_model_id,
+        .subagent_model_id = try alloc.dupe(
+            u8,
+            if (version == 2)
+                route_model
+            else
+                try requireString(object, "subagent_model_id"),
+        ),
     };
 }
 
@@ -3188,11 +3270,13 @@ test "codec structural helpers enforce exact objects and required strings" {
 test "recovery checkpoint round trips while legacy state stays absent" {
     const alloc = std.testing.allocator;
     const checkpoint = RecoveryCheckpoint{
-        .version = 2,
+        .version = 3,
         .route_identity = .{
             .connection_id = @constCast("vercel"),
             .adapter_kind = @constCast("vercel_ai_gateway"),
             .permission_review_model_id = @constCast("openai/gpt-review"),
+            .vision_model_id = @constCast("vision/model"),
+            .subagent_model_id = @constCast("subagent/model"),
         },
         .delivery = .possibly_sent,
         .turn_id = 42,
@@ -3317,7 +3401,15 @@ test "legacy route migration is idempotent and leaves the source readable on sta
         .permission_review_model_id = "openai/gpt-5.4",
     }));
     try std.testing.expectEqualStrings("vercel", staged.preferences.connection_id.?);
-    try std.testing.expectEqual(@as(u8, 2), staged.recovery_checkpoint.?.version);
+    try std.testing.expectEqual(@as(u8, 3), staged.recovery_checkpoint.?.version);
+    try std.testing.expectEqualStrings(
+        "google/gemini-2.5-flash",
+        staged.recovery_checkpoint.?.route_identity.?.vision_model_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "openai/gpt-test",
+        staged.recovery_checkpoint.?.route_identity.?.subagent_model_id,
+    );
     try std.testing.expectEqual(RecoveryDelivery.possibly_sent, staged.recovery_checkpoint.?.delivery);
 
     var encoded: std.Io.Writer.Allocating = .init(alloc);
@@ -3328,7 +3420,7 @@ test "legacy route migration is idempotent and leaves the source readable on sta
     try std.testing.expect(std.mem.find(u8, encoded.written(), "credential") == null);
 }
 
-test "durable route restart keeps connection primary and reviewer identity" {
+test "durable route restart keeps connection and every internal model identity" {
     const connection_registry = @import("../gateway/connection_registry.zig");
     const route_snapshot = @import("../gateway/route_snapshot.zig");
     const model_capabilities = @import("../config/model_capabilities.zig");
@@ -3351,11 +3443,13 @@ test "durable route restart keeps connection primary and reviewer identity" {
         .total_input_tokens = 0,
         .total_output_tokens = 0,
         .recovery_checkpoint = .{
-            .version = 2,
+            .version = 3,
             .route_identity = .{
                 .connection_id = @constCast("connection-a"),
                 .adapter_kind = @constCast("loopback"),
                 .permission_review_model_id = @constCast("reviewer-a"),
+                .vision_model_id = @constCast("vision-a"),
+                .subagent_model_id = @constCast("subagent-a"),
             },
             .delivery = .possibly_sent,
             .turn_id = 9,
@@ -3386,7 +3480,11 @@ test "durable route restart keeps connection primary and reviewer identity" {
             .protocol = @constCast("loopback"),
             .credential_ref = @constCast("stored_key"),
             .remembered_model = @constCast("model-a"),
-            .permission_review_model = @constCast("reviewer-changed-after-save"),
+            .internal_models = .{
+                .permission_review = @constCast("reviewer-changed-after-save"),
+                .vision = @constCast("vision-changed-after-save"),
+                .subagent = @constCast("subagent-changed-after-save"),
+            },
         },
         .{
             .id = @constCast("connection-b"),
@@ -3396,7 +3494,11 @@ test "durable route restart keeps connection primary and reviewer identity" {
             .protocol = @constCast("loopback"),
             .credential_ref = @constCast("stored_key"),
             .remembered_model = @constCast("model-b"),
-            .permission_review_model = @constCast("reviewer-b"),
+            .internal_models = .{
+                .permission_review = @constCast("reviewer-b"),
+                .vision = @constCast("vision-b"),
+                .subagent = @constCast("subagent-b"),
+            },
         },
     };
     const stored = connection_registry.Stored{
@@ -3427,6 +3529,8 @@ test "durable route restart keeps connection primary and reviewer identity" {
         seed,
         checkpoint.route_identity.?.adapter_kind,
         checkpoint.route_identity.?.permission_review_model_id,
+        checkpoint.route_identity.?.vision_model_id,
+        checkpoint.route_identity.?.subagent_model_id,
         .{
             .id = checkpoint.route_model,
             .display_name = checkpoint.route_model,
@@ -3441,6 +3545,8 @@ test "durable route restart keeps connection primary and reviewer identity" {
     try std.testing.expectEqualStrings("connection-a", route.connection_id);
     try std.testing.expectEqualStrings("route-model-a", route.primary_model_id);
     try std.testing.expectEqualStrings("reviewer-a", route.permission_review_model_id.?);
+    try std.testing.expectEqualStrings("vision-a", route.vision_model_id.?);
+    try std.testing.expectEqualStrings("subagent-a", route.subagent_model_id);
 
     var missing_profiles = [_]connection_registry.Profile{profiles[1]};
     const missing_stored = connection_registry.Stored{
@@ -3460,7 +3566,50 @@ test "durable route restart keeps connection primary and reviewer identity" {
     );
 }
 
-test "corrupted v2 route authority is rejected" {
+test "Vercel v2 recovery route reads bounded legacy internal model identities" {
+    const encoded =
+        "{\"version\":2," ++
+        "\"route_identity\":{\"connection_id\":\"connection-a\",\"adapter_kind\":\"vercel_ai_gateway\",\"permission_review_model_id\":\"reviewer-a\"}," ++
+        "\"delivery\":\"possibly_sent\",\"turn_id\":1," ++
+        "\"user\":{\"text\":\"resume\",\"images\":[]},\"assistant_source\":\"\"," ++
+        "\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}," ++
+        "\"cause\":\"network_interrupted\",\"action\":\"retrying_request\",\"tool_state\":\"none\"," ++
+        "\"route_model\":\"primary-a\",\"requested_fast_mode\":false,\"fast_mode\":false," ++
+        "\"max_provider_attempts\":2,\"consumed_provider_attempts\":1,\"outstanding_reservation\":false}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+    defer parsed.deinit();
+    var checkpoint = try parseRecoveryCheckpoint(std.testing.allocator, parsed.value);
+    defer checkpoint.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u8, 2), checkpoint.version);
+    try std.testing.expectEqualStrings("connection-a", checkpoint.route_identity.?.connection_id);
+    try std.testing.expectEqualStrings("reviewer-a", checkpoint.route_identity.?.permission_review_model_id.?);
+    try std.testing.expectEqualStrings(
+        "google/gemini-2.5-flash",
+        checkpoint.route_identity.?.vision_model_id.?,
+    );
+    try std.testing.expectEqualStrings("primary-a", checkpoint.route_identity.?.subagent_model_id);
+}
+
+test "non-Vercel v2 recovery route is rejected before migration" {
+    const encoded =
+        "{\"version\":2," ++
+        "\"route_identity\":{\"connection_id\":\"connection-a\",\"adapter_kind\":\"loopback\",\"permission_review_model_id\":\"reviewer-a\"}," ++
+        "\"delivery\":\"possibly_sent\",\"turn_id\":1," ++
+        "\"user\":{\"text\":\"resume\",\"images\":[]},\"assistant_source\":\"\"," ++
+        "\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}," ++
+        "\"cause\":\"network_interrupted\",\"action\":\"retrying_request\",\"tool_state\":\"none\"," ++
+        "\"route_model\":\"primary-a\",\"requested_fast_mode\":false,\"fast_mode\":false," ++
+        "\"max_provider_attempts\":2,\"consumed_provider_attempts\":1,\"outstanding_reservation\":false}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(
+        error.InvalidDurableField,
+        parseRecoveryCheckpoint(std.testing.allocator, parsed.value),
+    );
+}
+
+test "corrupted recovery route authority is rejected" {
     const state = DurableSessionState{
         .id = @constCast("corrupt-route"),
         .origin_workspace_root = @constCast("/tmp/origin"),
@@ -3478,11 +3627,13 @@ test "corrupted v2 route authority is rejected" {
         .total_input_tokens = 0,
         .total_output_tokens = 0,
         .recovery_checkpoint = .{
-            .version = 2,
+            .version = 3,
             .route_identity = .{
                 .connection_id = @constCast("connection-b"),
                 .adapter_kind = @constCast("loopback"),
                 .permission_review_model_id = null,
+                .vision_model_id = null,
+                .subagent_model_id = @constCast("model-a"),
             },
             .turn_id = 1,
             .user = .{ .text = @constCast("resume") },

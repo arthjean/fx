@@ -764,7 +764,10 @@ fn runAutomaticReview(
             "event=auto_review_result tool_name={s} decision=cancelled_or_error fallback_reason={s} elapsed_ms={d} execution_started=false call_id={s}",
             .{ call.name, @errorName(err), io_mod.milliTimestamp() - started_ms, call.id },
         );
-        return err;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (err == error.Cancelled and
+            input.worker.worker_cancel_requested.load(.seq_cst)) return error.Cancelled;
+        return .invalid;
     };
     switch (review) {
         .valid => |result| debug_trace.logf(
@@ -4358,6 +4361,167 @@ test "invalid automatic review blocks without a prompter" {
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, outcome.decision);
     try std.testing.expect(outcome.execution_authority == null);
     try std.testing.expect(outcome.auto_review_result == null);
+}
+
+test "failed automatic review falls back interactively and denies headless" {
+    const FailedReviewer = struct {
+        calls: usize = 0,
+
+        fn classify(
+            raw_ctx: *anyopaque,
+            _: Allocator,
+            _: permission_auto_classifier.ReviewRequest,
+        ) anyerror!permission_auto_classifier.ParseOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
+            self.calls += 1;
+            return error.ReviewerFailed;
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var reviewer = FailedReviewer{};
+    var recording = RecordingPrompter{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&reviewer),
+            FailedReviewer.classify,
+        ),
+    );
+    input.permission_prompter = recording.prompter();
+    const call = ToolCall{
+        .id = "failed-review",
+        .name = "run_command",
+        .arguments_json = "{\"command\":\"touch failed-review.txt\"}",
+    };
+
+    const interactive = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        call,
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(ToolPermissionDecision.once, interactive.decision);
+    try std.testing.expectEqual(@as(usize, 1), recording.calls);
+
+    input.permission_prompter = null;
+    const headless = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        call,
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(ToolPermissionDecision.permission_required, headless.decision);
+    try std.testing.expectEqual(
+        types.ToolPermissionDenialReason.permission_required,
+        headless.denial_reason.?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), reviewer.calls);
+}
+
+test "cancelled automatic review falls back to the interactive prompt" {
+    const CancelledReviewer = struct {
+        calls: usize = 0,
+
+        fn classify(
+            raw_ctx: *anyopaque,
+            _: Allocator,
+            _: permission_auto_classifier.ReviewRequest,
+        ) anyerror!permission_auto_classifier.ParseOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
+            self.calls += 1;
+            return error.Cancelled;
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var reviewer = CancelledReviewer{};
+    var recording = RecordingPrompter{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&reviewer),
+            CancelledReviewer.classify,
+        ),
+    );
+    input.permission_prompter = recording.prompter();
+
+    const outcome = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "cancelled-review",
+            .name = "run_command",
+            .arguments_json = "{\"command\":\"touch cancelled-review.txt\"}",
+        },
+        .auto,
+        &.{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
+    try std.testing.expectEqual(@as(usize, 1), recording.calls);
+    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
+}
+
+test "cancelled automatic review denies visibly without a prompter" {
+    const CancelledReviewer = struct {
+        fn classify(
+            _: *anyopaque,
+            _: Allocator,
+            _: permission_auto_classifier.ReviewRequest,
+        ) anyerror!permission_auto_classifier.ParseOutcome {
+            return error.Cancelled;
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var reviewer: u8 = 0;
+    const input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&reviewer),
+            CancelledReviewer.classify,
+        ),
+    );
+
+    const outcome = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "cancelled-review-headless",
+            .name = "run_command",
+            .arguments_json = "{\"command\":\"touch cancelled-review-headless.txt\"}",
+        },
+        .auto,
+        &.{},
+    );
+
+    try std.testing.expectEqual(ToolPermissionDecision.permission_required, outcome.decision);
+    try std.testing.expectEqual(
+        types.ToolPermissionDenialReason.permission_required,
+        outcome.denial_reason.?,
+    );
+    try std.testing.expect(outcome.execution_authority == null);
 }
 
 test "automatic review is skipped for deterministic command authorities" {
