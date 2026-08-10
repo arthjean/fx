@@ -2394,8 +2394,8 @@ test "durable state round trips every live history byte field exactly" {
         25,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     var usage = try usage_runtime.snapshot(alloc);
     defer usage.deinit(alloc);
