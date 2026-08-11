@@ -535,6 +535,7 @@ fn loadVercelStatus(
         .profile = profile,
         .host = auth_host,
         .mode = .stored,
+        .source_resolution = .allow_fallback,
     });
     var credential = switch (acquisition) {
         .acquired => |value| value,
@@ -3526,6 +3527,7 @@ test "top-level status and interactive acquire resolve one adapter with zero cro
         .profile = peer_profile,
         .host = .{ .secret_store = peer_store.store() },
         .mode = .if_needed,
+        .source_resolution = .allow_fallback,
     })) {
         .acquired => |value| value,
         .missing, .failed, .cancelled => return error.UnexpectedAdapterAcquisition,
@@ -3554,6 +3556,7 @@ test "adapter auth preserves invalid references refresh failures and late cancel
         .profile = invalid_profile,
         .host = .{ .secret_store = vercel_store.store() },
         .mode = .if_needed,
+        .source_resolution = .exact,
     });
     switch (invalid) {
         .failed => |failure| try std.testing.expectEqual(adapter_auth.FailureCategory.configuration, failure.category),
@@ -3576,6 +3579,7 @@ test "adapter auth preserves invalid references refresh failures and late cancel
         .profile = adapterAuthTestProfile(connection_seed.adapter_id, "fx_login"),
         .host = .{ .secret_store = vercel_store.store() },
         .mode = .force,
+        .source_resolution = .exact,
         .current_source_id = "fx_login",
     });
     switch (refresh) {
@@ -3608,6 +3612,7 @@ test "adapter auth preserves invalid references refresh failures and late cancel
         .profile = peer_profile,
         .host = .{ .secret_store = peer_store.store() },
         .mode = .if_needed,
+        .source_resolution = .exact,
         .cancel_flag = &cancel_flag,
     });
     try std.testing.expect(cancelled == .cancelled);
