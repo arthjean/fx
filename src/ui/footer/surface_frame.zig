@@ -1719,7 +1719,7 @@ test "surface footer measurement reserves only the compact auth picker rows" {
 
 test "surface footer places the cursor after the Vercel team query" {
     const auth_runtime = @import("../../core/auth/auth_runtime.zig");
-    const login_flow = @import("../../core/auth/login_flow.zig");
+    const adapter_auth = @import("../../core/gateway/adapter_auth.zig");
     const alloc = std.testing.allocator;
     var approval = ApprovalPrompt{};
     defer approval.deinit(alloc);
@@ -1730,7 +1730,7 @@ test "surface footer places the cursor after the Vercel team query" {
     var team_id = "team_123".*;
     var team_slug = "vercel-internal-playground".*;
     var team_name = "Internal Playground".*;
-    const teams = [_]login_flow.Team{.{
+    const teams = [_]adapter_auth.Team{.{
         .id = &team_id,
         .slug = &team_slug,
         .name = &team_name,
