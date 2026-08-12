@@ -66,7 +66,7 @@ pub fn inspect(
         descriptor.id,
         request.retry_count,
         .{
-            .serialized_tools = "[]",
+            .tools = &.{},
             .messages = &messages,
             .tool_choice = .none,
             .capabilities = descriptor.capabilities,
@@ -93,7 +93,7 @@ pub fn inspect(
     defer streamed.deinit(alloc);
 
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (streamed.status != .ok) return error.ImageProviderUnavailable;
+    if (!streamed.succeeded()) return error.ImageProviderUnavailable;
     if (capture.failed) return error.OutOfMemory;
     if (capture.saw_content) {
         return .{
