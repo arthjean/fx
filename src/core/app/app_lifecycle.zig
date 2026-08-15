@@ -2169,7 +2169,7 @@ test "loadStartupState enables fast mode only for the compiled model default" {
             .endpoint = "https://ai-gateway.vercel.sh/v3/ai/language-model",
             .protocol = "vercel_ai_gateway",
             .credential_ref = "automatic",
-            .permission_review_model = "openai/gpt-5.4",
+            .internal_models = .{ .permission_review = "openai/gpt-5.4" },
         },
     );
     defer state.deinit(std.testing.allocator);
