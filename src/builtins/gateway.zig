@@ -183,11 +183,6 @@ const AdapterEventBridge = struct {
         const self: *AdapterEventBridge = @ptrCast(@alignCast(raw));
         self.emit(.{ .tool_input_started = .{ .id = id, .name = name, .label = label } });
     }
-
-    fn connectionStatus(raw: *anyopaque, status: shared_types.GatewayConnectionStatus) anyerror!void {
-        const self: *AdapterEventBridge = @ptrCast(@alignCast(raw));
-        try self.events.emit(.{ .connection_status = status });
-    }
 };
 
 fn streamVercelAdapter(
@@ -224,10 +219,6 @@ fn streamVercelAdapter(
         .trace_ctx = request.trace_ctx,
         .content_capture_limit = request.content_capture_limit,
         .cooperative_pulse = request.cooperative_pulse,
-        .connection_status = .{
-            .ctx = &bridge,
-            .push = AdapterEventBridge.connectionStatus,
-        },
         .delivery = request.delivery,
         .attempt_evidence = request.attempt_evidence,
         .callback_ctx = &bridge,
@@ -348,6 +339,7 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     };
     var cancelled = std.atomic.Value(bool).init(false);
     var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
     var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
     defer state.deinit();
     var sink_error: ?anyerror = null;
@@ -367,6 +359,7 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,
+        .attempt_evidence = &attempt_evidence,
         .cancel_flag = &cancelled,
     }, .{
         .context = &sink_context,
