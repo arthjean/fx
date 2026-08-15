@@ -241,8 +241,8 @@ fn runAskChild(
             .permission_rules = admission.rules,
             .mcp_runtime = ctx.mcp,
             .subagent_available = true,
-        .terminal_available = tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
-        .provider_tools = ctx.cfg.gateway_provider.provider_adapter.provider_tools,
+            .terminal_available = tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
+            .provider_tools = ctx.cfg.gateway_provider.provider_adapter.provider_tools,
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(ctx.alloc);
@@ -2004,7 +2004,7 @@ fn resolveModelCapabilities(raw_ctx: *anyopaque, _: Allocator, model: []const u8
     const catalog = gateway_provider.modelCatalogForAdapter(
         ctx.connection_adapter_kind,
         adapter,
-    ) orelse return adapter.model_descriptors.fallback(model);
+    ) orelse return adapter.model_descriptors.fallback(model).capabilities;
     return ctx.capability_resolver.resolve(
         ctx.alloc,
         catalog,

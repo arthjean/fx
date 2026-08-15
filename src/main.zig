@@ -1704,11 +1704,11 @@ const App = struct {
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
-        .terminal_available = self.session_persistence.subagent_host != null and
-            tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
-        .provider_tools = self.providerAdapter().provider_tools,
-        .fx_web_search_installed = host_profile.web_search and
-            self.providerAdapter().web_search != null,
+            .terminal_available = self.session_persistence.subagent_host != null and
+                tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
+            .provider_tools = self.providerAdapter().provider_tools,
+            .fx_web_search_installed = host_profile.web_search and
+                self.providerAdapter().web_search != null,
         });
     }
 

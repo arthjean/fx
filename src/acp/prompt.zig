@@ -716,8 +716,8 @@ pub fn runSubagentChild(
             .permission_rules = admission.rules,
             .mcp_runtime = mcp,
             .subagent_available = true,
-        .terminal_available = tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
-        .provider_tools = state.cfg.gateway_provider.provider_adapter.provider_tools,
+            .terminal_available = tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
+            .provider_tools = state.cfg.gateway_provider.provider_adapter.provider_tools,
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(alloc);
