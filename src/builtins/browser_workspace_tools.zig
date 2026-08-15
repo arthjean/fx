@@ -12,7 +12,7 @@ const run_command = buildRunCommandSpec();
 fn buildRunCommandSpec() tool_dispatch.Tool {
     var spec = builtin_tools.run_command;
     spec.description = run_command_description;
-    spec.gateway_schema = .{
+    spec.descriptor = .{
         .name = "run_command",
         .description = run_command_description,
         .input_schema = .{
@@ -51,7 +51,7 @@ test "browser workspace projects exactly one command-only run_command" {
     try std.testing.expectEqualStrings("run_command", advertisement_set.order[0]);
     try std.testing.expectEqual(@as(usize, 0), advertisement_set.read_only_tool_names.len);
 
-    const schema = registry.tools[0].gateway_schema;
+    const schema = registry.tools[0].descriptor;
     try std.testing.expectEqual(@as(usize, 1), schema.input_schema.properties.len);
     try std.testing.expectEqualStrings("command", schema.input_schema.properties[0].name);
     try std.testing.expectEqual(@as(?usize, 64 * 1024), schema.input_schema.properties[0].max_length);

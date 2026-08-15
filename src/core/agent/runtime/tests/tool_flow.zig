@@ -4697,7 +4697,7 @@ test "permission feedback follows the matching tool result" {
     });
 }
 
-test "batched permission feedback follows every tool result before the next gateway request" {
+test "batched permission feedback follows every tool result before the next model request" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
         toolCall("call_first", "run_command", "{\"command\":\"printf first\"}"),
@@ -4795,7 +4795,7 @@ test "initial session grants follow active registry metadata" {
 
     var provider_list = builtin_tools.list_files;
     provider_list.name = "provider_list";
-    provider_list.gateway_schema.name = "provider_list";
+    provider_list.descriptor.name = "provider_list";
     const tools = [_]tool_dispatch.Tool{provider_list};
 
     var hooks = FakeAgentRuntimeDeps.init(alloc);
@@ -5930,8 +5930,9 @@ test "processQueuedPrompt pauses retryable failures and preserves execution on t
     const cases = [_]Case{
         .{
             .completion = .{
-                .status = .bad_gateway,
-                .err_body = "gateway unavailable",
+                .failure_category = .upstream_failure,
+                .failure_retryable = true,
+                .failure_detail = "adapter unavailable",
             },
             .expected = .paused,
         },

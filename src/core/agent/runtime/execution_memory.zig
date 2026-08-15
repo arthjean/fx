@@ -510,7 +510,6 @@ test "exact command sources delete replay and missing handles retain it" {
         .{
             .system_prompt = "",
             .gateway_retry_count = 0,
-            .gateway_chat_url = "",
             .model_tools = &.{},
             .agent_step_limit = 1,
             .cancel_flag = &cancel_flag,
@@ -664,7 +663,6 @@ test "common execution memory does not mark stored read previews as full" {
         .{
             .system_prompt = "",
             .gateway_retry_count = 0,
-            .gateway_chat_url = "",
             .model_tools = &.{},
             .agent_step_limit = 1,
             .cancel_flag = &cancel_flag,
@@ -775,7 +773,6 @@ test "large result storage redacts secret-bearing output before preview and disk
     const prepared = try prepareToolModelOutput(arena, .{
         .system_prompt = "",
         .gateway_retry_count = 0,
-        .gateway_chat_url = "",
         .model_tools = &.{},
         .agent_step_limit = 1,
         .cancel_flag = &cancel_flag,

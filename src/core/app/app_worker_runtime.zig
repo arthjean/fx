@@ -2385,7 +2385,7 @@ test "core.app_worker_runtime suppresses route recovery activity while question 
     defer input.deinit(std.testing.allocator);
     const ctx = render_input.RenderContext{
         .stream = app.stream,
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
