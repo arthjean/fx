@@ -764,7 +764,6 @@ test "normalized failure state preserves HTTP status and delivery independently"
             .on_tool_start = null,
             .on_reasoning_chunk = null,
             .on_tool_input_chunk = null,
-            .connection_status = null,
         };
         defer collector.deinit();
 
@@ -791,7 +790,6 @@ test "normalized failure state preserves HTTP status and delivery independently"
         .on_tool_start = null,
         .on_reasoning_chunk = null,
         .on_tool_input_chunk = null,
-        .connection_status = null,
     };
     defer collector.deinit();
     try AdapterEventCollector.emit(&collector, .{ .failure = .{
@@ -833,6 +831,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
     defer usage.deinit(alloc);
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     var route = testingRoute("provider:endpoint");
     const result = try streamModelRequest(
@@ -840,6 +839,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
         alloc,
         &route,
         "credential",
+        null,
         null,
         "test/model",
         1,
@@ -850,8 +850,8 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
             .capabilities = .{},
         },
         null,
-        null,
         &delivery,
+        &attempt_evidence,
         &callback_ctx,
         Callbacks.content,
         null,
