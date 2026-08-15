@@ -803,6 +803,7 @@ test "ambiguous-delivery category implies ambiguous delivery evidence" {
     const alloc = std.testing.allocator;
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     var route = testingRoute("provider:endpoint");
     var result = try streamModelRequest(
@@ -811,12 +812,13 @@ test "ambiguous-delivery category implies ambiguous delivery evidence" {
         &route,
         "credential",
         null,
+        null,
         "test/model",
         1,
         .{ .tools = &.{}, .messages = &.{}, .tool_choice = .none, .capabilities = .{} },
         null,
-        null,
         &delivery,
+        &attempt_evidence,
         &callback_ctx,
         Callbacks.content,
         null,

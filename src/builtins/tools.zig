@@ -1486,7 +1486,7 @@ test "terminal action contracts and admission agree on every action field" {
     }
 }
 
-test "terminal gateway advertisement projects a provider-compatible object schema" {
+test "terminal advertisement projects a provider-neutral object schema" {
     const alloc = std.testing.allocator;
     var projection = try tool_advertisement.buildGatewayToolProjectionForSet(
         alloc,
@@ -1494,31 +1494,26 @@ test "terminal gateway advertisement projects a provider-compatible object schem
         .{ .terminal_available = true },
     );
     defer projection.deinit(alloc);
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, projection.tools_json, .{});
-    defer parsed.deinit();
 
-    var terminal_schema: ?std.json.ObjectMap = null;
-    for (parsed.value.array.items) |tool_value| {
-        if (tool_value != .object) continue;
-        const name = tool_value.object.get("name") orelse continue;
-        if (name != .string or !std.mem.eql(u8, name.string, "terminal")) continue;
-        terminal_schema = tool_value.object.get("inputSchema").?.object;
-        break;
+    var terminal_schema: ?gateway_schema.ObjectSchema = null;
+    for (projection.tools) |tool| {
+        if (std.mem.eql(u8, tool.name, "terminal")) {
+            terminal_schema = tool.input_schema;
+            break;
+        }
     }
 
     const input_schema = terminal_schema orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("object", input_schema.get("type").?.string);
-    try std.testing.expect(input_schema.get("oneOf") == null);
-    try std.testing.expectEqual(false, input_schema.get("additionalProperties").?.bool);
-    const properties = input_schema.get("properties").?.object;
-    try std.testing.expectEqual(terminal_gateway_properties.len, properties.count());
+    try std.testing.expectEqual(@as(usize, 0), input_schema.one_of.len);
+    try std.testing.expectEqual(false, input_schema.additional_properties.?);
+    try std.testing.expectEqual(terminal_gateway_properties.len, input_schema.properties.len);
+    const action_property = schemaProperty(input_schema, "action") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
         std.meta.tags(terminal_contracts.Action).len,
-        properties.get("action").?.object.get("enum").?.array.items.len,
+        action_property.enum_values.len,
     );
-    const required = input_schema.get("required").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), required.len);
-    try std.testing.expectEqualStrings("action", required[0].string);
+    try std.testing.expectEqual(@as(usize, 1), input_schema.required.len);
+    try std.testing.expectEqualStrings("action", input_schema.required[0]);
 }
 
 fn allowTerminalTool(

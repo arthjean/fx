@@ -820,11 +820,13 @@ pub fn streamVercelAdapter(
         } });
     } else {
         const failure_facts = classifyVercelHttpFailure(result.status);
-        const detail = if (result.err_body) |body|
-            try gateway_error_format.formatHttpErrorMessage(alloc, result.status, body)
-        else
-            try gateway_error_format.formatHttpErrorMessage(alloc, result.status, "");
-        defer alloc.free(detail);
+        const detail = result.err_body orelse "";
+        const recovery_diagnostic = try gateway_error_format.formatHttpRecoveryDiagnostic(
+            alloc,
+            result.status,
+            detail,
+        );
+        defer alloc.free(recovery_diagnostic);
         try events.emit(.{ .failure = .{
             .category = failure_facts.category,
             .retryable = failure_facts.retryable,
@@ -832,10 +834,10 @@ pub fn streamVercelAdapter(
             .delivery_ambiguous = result.completion.delivery_ambiguous,
             .detail = detail,
             .retry_after_seconds = result.retry_after_seconds,
-            .diagnostic = if (result.failure_schema) |summary| .{
-                .summary = summary,
+            .diagnostic = .{
+                .summary = recovery_diagnostic,
                 .request_shape = result.failure_request_shape,
-            } else null,
+            },
         } });
     }
 }
@@ -1023,6 +1025,8 @@ test "Vercel and peer adapters receive equivalent neutral requests with isolated
     };
     var cancelled = std.atomic.Value(bool).init(false);
     var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var vercel_attempt: agent_stream_provider_contract.AttemptEvidence = .{};
+    var peer_attempt: agent_stream_provider_contract.AttemptEvidence = .{};
     var sink_error: ?anyerror = null;
     var vercel_capture: Capture = .{};
     var vercel_state = agent_stream_provider_contract.EventState.init(alloc);
@@ -1038,6 +1042,7 @@ test "Vercel and peer adapters receive equivalent neutral requests with isolated
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,
+        .attempt_evidence = &vercel_attempt,
         .cancel_flag = &cancelled,
     }, .{
         .context = &vercel_capture,
@@ -1060,6 +1065,7 @@ test "Vercel and peer adapters receive equivalent neutral requests with isolated
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,
+        .attempt_evidence = &peer_attempt,
         .cancel_flag = &cancelled,
     }, .{
         .context = &peer_capture,
