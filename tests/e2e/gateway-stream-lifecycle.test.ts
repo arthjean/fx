@@ -720,7 +720,8 @@ describe("gateway stream lifecycle", () => {
             FX_MODEL: parentModel,
             FX_GATEWAY_BASE_URL: gatewayA.baseUrl,
             FX_GATEWAY_CHAT_URL: gatewayA.chatUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gatewayA.baseUrl}/v1/models`,
+            FX_E2E_GATEWAY_MODELS_URL:
+              `${gatewayA.baseUrl}/coding-agent/v1/models`,
             FX_TRACE_LOG: tracePath,
             FX_TRACE_SCOPES: "agent,permission,subagent,tool",
           },
@@ -915,7 +916,8 @@ describe("gateway stream lifecycle", () => {
       FX_MODEL: undefined,
       FX_GATEWAY_BASE_URL: gatewayA.baseUrl,
       FX_GATEWAY_CHAT_URL: undefined,
-      FX_E2E_GATEWAY_MODELS_URL: `${gatewayA.baseUrl}/v1/models`,
+      FX_E2E_GATEWAY_MODELS_URL:
+        `${gatewayA.baseUrl}/coding-agent/v1/models`,
       FX_AUTO_UPGRADE: "0",
       NO_COLOR: "1",
     };
