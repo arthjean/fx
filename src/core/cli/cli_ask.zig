@@ -1914,8 +1914,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .push_command_output_complete = pushCommandOutputComplete,
         .push_provider_failure = pushProviderFailure,
         .resolve_route_credential = resolveRouteCredential,
-        .available_model_descriptor = availableModelDescriptor,
-        .resolve_model_descriptor = resolveModelDescriptor,
         .format_tool_execution_error = formatToolExecutionError,
         .record_tool_call_rejected = recordToolCallRejected,
         .report_usage = reportUsage,
@@ -4246,7 +4244,7 @@ fn testProcessQueuedPromptUnauthorized(deps: *const agent_runtime.AgentRuntimeDe
         deps.ctx,
         .authentication,
         "provider rejected secret-key body",
-        if (ctx.route_source) |source| auth_runtime.normalizedSource(source) else null,
+        ctx.route_source,
     );
     _ = job;
 }
