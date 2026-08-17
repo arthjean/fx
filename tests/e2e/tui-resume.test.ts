@@ -4835,7 +4835,7 @@ test.skipIf(!tmuxAvailable())(
       fakeGatewayFinalText("UPGRADE_CTRL_G_INITIAL_DONE"),
       fakeGatewayFinalText("UPGRADE_CTRL_G_FOLLOWUP_DONE"),
     ]);
-    const release = startUpgradeServer(root, argvLogPath, "v0.0.1");
+    const release = startUpgradeServer(root, argvLogPath, "v0.0.2");
 
     try {
       writeFileSync(stderrPath, "");
