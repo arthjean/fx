@@ -94,7 +94,7 @@ pub const PermissionTargetKind = enum {
 
 pub const web_search_permission = "web_search";
 pub const web_fetch_permission = "web_fetch";
-pub const yolo_warning_text = "YOLO enabled: permissions and sandboxing disabled";
+pub const yolo_warning_text = "YOLO enabled: fx permission checks disabled";
 
 pub fn isWebSearchToolName(tool_name: []const u8) bool {
     return std.mem.eql(u8, tool_name, web_search_permission);
@@ -244,7 +244,7 @@ fn resolveCommandCwdFromArgs(
     workspace_root: []const u8,
     args: std.json.ObjectMap,
 ) ![]const u8 {
-    const cwd_input = tool_args.optionalStringArg(args, "cwd") orelse ".";
+    const cwd_input = tool_args.nullablePlaceholderStringArg(args, "cwd") orelse ".";
     if (std.mem.eql(u8, cwd_input, ".")) return arena.dupe(u8, workspace_root);
     return pathing.resolveWorkspaceOrExternalPath(arena, workspace_root, cwd_input);
 }
@@ -254,7 +254,7 @@ fn resolveCommandCwdFromArgsInScope(
     scope: workspace_access.AccessScope,
     args: std.json.ObjectMap,
 ) ![]const u8 {
-    const cwd_input = tool_args.optionalStringArg(args, "cwd") orelse ".";
+    const cwd_input = tool_args.nullablePlaceholderStringArg(args, "cwd") orelse ".";
     if (std.mem.eql(u8, cwd_input, ".")) return arena.dupe(u8, scope.primary_directory);
     return pathing.resolveWorkspaceOrExternalPath(arena, scope.primary_directory, cwd_input);
 }
@@ -1247,7 +1247,7 @@ pub fn sessionGrantAllowed(grants: []const types.PermissionGrant, tool_name: []c
 
     for (grants) |grant| {
         if (!permissionPatternMatchesTool(grant.tool_name, permission, tool_name)) continue;
-        if (std.mem.eql(u8, permission, "bash") or std.mem.eql(u8, permission, "sandbox")) {
+        if (std.mem.eql(u8, permission, "bash")) {
             if (!std.mem.eql(u8, grant.target_path, pattern)) continue;
         } else if (!permissionPatternMatchesTarget(grant.target_path, pattern)) continue;
         return true;
@@ -1279,7 +1279,6 @@ pub fn suggestedSessionGrants(alloc: std.mem.Allocator, workspace_root: []const 
         const command = patternForSessionGrantMatch(tool_name, target_path);
 
         try appendOwnedGrant(alloc, &grants, "bash", command);
-        try appendOwnedGrant(alloc, &grants, "sandbox", command);
         return grants.toOwnedSlice(alloc);
     }
 
@@ -1525,8 +1524,7 @@ pub fn permissionRulePatternForGrant(alloc: std.mem.Allocator, workspace_root: [
     }
 
     if (std.mem.eql(u8, permission, "url") or
-        std.mem.eql(u8, permission, "skill") or
-        std.mem.eql(u8, permission, "sandbox"))
+        std.mem.eql(u8, permission, "skill"))
     {
         return alloc.dupe(u8, pattern);
     }
@@ -1559,10 +1557,6 @@ fn patternForRuleMatch(alloc: std.mem.Allocator, workspace_root: []const u8, too
             target_path;
         return alloc.dupe(u8, command_environment.commandFromPermissionIdentity(identity));
     }
-    if (std.mem.eql(u8, permission, "sandbox")) {
-        return alloc.dupe(u8, command_environment.commandFromPermissionIdentity(target_path));
-    }
-
     return displayTargetForPolicy(alloc, workspace_root, tool_name, target_path, target_kind);
 }
 
@@ -1678,7 +1672,7 @@ fn permissionPatternMatchesTarget(pattern: []const u8, candidate: []const u8) bo
 
 fn ruleTargetMatches(permission: []const u8, action: RuleDecision, pattern: []const u8, candidate: []const u8) bool {
     if (action != .allow or
-        (!std.mem.eql(u8, permission, "bash") and !std.mem.eql(u8, permission, "sandbox")))
+        !std.mem.eql(u8, permission, "bash"))
     {
         return permissionPatternMatchesTarget(pattern, candidate);
     }
@@ -2093,13 +2087,10 @@ test "sessionGrantAllowed maps tool categories and matches command grants exactl
 test "session command grants treat wildcard bytes literally" {
     const grants = [_]types.PermissionGrant{
         .{ .tool_name = @constCast("bash"), .target_path = @constCast("printf '*?'") },
-        .{ .tool_name = @constCast("sandbox"), .target_path = @constCast("printf '*?'") },
     };
 
     try std.testing.expect(sessionGrantAllowed(&grants, "run_command", "/tmp/workspace::printf '*?'"));
     try std.testing.expect(!sessionGrantAllowed(&grants, "run_command", "/tmp/workspace::printf 'file?'"));
-    try std.testing.expect(sessionGrantAllowed(&grants, "sandbox", "printf '*?'"));
-    try std.testing.expect(!sessionGrantAllowed(&grants, "sandbox", "printf 'file?'"));
 }
 
 test "permissionTargetForCall preserves run_command cwd targets" {
@@ -2636,7 +2627,6 @@ test "configured wildcard command allows only static command grammar" {
     try std.testing.expectEqual(RuleDecision.allow, ruleDecisionForPermissionPattern(rules, "bash", "printf 'safe value'", .none));
     try std.testing.expectEqual(RuleDecision.none, ruleDecisionForPermissionPattern(rules, "bash", "printf safe && touch /tmp/fx-marker", .none));
     try std.testing.expectEqual(RuleDecision.none, ruleDecisionForPermissionPattern(rules, "bash", "printf \"$(touch /tmp/fx-marker)\"", .none));
-    try std.testing.expectEqual(RuleDecision.none, ruleDecisionForPermissionPattern(rules, "sandbox", "printf safe | sh", .none));
 }
 
 test "configured command rules require exact matching outside static grammar" {
@@ -2660,12 +2650,12 @@ test "configured command rules require exact matching outside static grammar" {
 test "configured command deny and ask retain generic wildcard matching" {
     var rules_buf = [_]types.PermissionRule{
         .{ .permission = @constCast("bash"), .pattern = @constCast("printf *"), .action = .deny },
-        .{ .permission = @constCast("sandbox"), .pattern = @constCast("printf *"), .action = .ask },
+        .{ .permission = @constCast("custom"), .pattern = @constCast("printf *"), .action = .ask },
     };
     const rules: types.PermissionRuleSet = .{ .rules = &rules_buf };
 
     try std.testing.expectEqual(RuleDecision.deny, ruleDecisionForPermissionPattern(rules, "bash", "printf safe && touch /tmp/fx-marker", .none));
-    try std.testing.expectEqual(RuleDecision.ask, ruleDecisionForPermissionPattern(rules, "sandbox", "printf \"$(touch /tmp/fx-marker)\"", .none));
+    try std.testing.expectEqual(RuleDecision.ask, ruleDecisionForPermissionPattern(rules, "custom", "printf \"$(touch /tmp/fx-marker)\"", .none));
 }
 
 test "static command grammar is an explicit allowlist" {
@@ -2732,6 +2722,20 @@ test "rulesDenyAllTargetsForPermission honors last matching overrides" {
         .{ .permission = @constCast("edit"), .pattern = @constCast("src/*"), .action = .deny },
     };
     try std.testing.expect(!rulesDenyAllTargetsForPermission(.{ .rules = &target_deny_rules }, "edit"));
+}
+
+test "command permission target treats a textual null cwd as absent" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const target = try permissionTargetForCall(arena, "/tmp/workspace", .{
+        .id = "terminal",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"ls\",\"cwd\":\" NULL \"}",
+    }, .command_cwd);
+
+    try std.testing.expectEqualStrings("/tmp/workspace::ls", target);
 }
 
 test "web_fetch permission target is canonical domain rather than full url" {
@@ -2884,21 +2888,6 @@ test "configured command rules match explicit environments by command" {
         RuleDecision.allow,
         try ruleDecisionFor(alloc, rules, "/tmp/workspace", "run_command", target, .command_cwd),
     );
-
-    var sandbox_rules_buf = [_]types.PermissionRule{
-        .{ .permission = @constCast("sandbox"), .pattern = @constCast("zig *"), .action = .deny },
-    };
-    try std.testing.expectEqual(
-        RuleDecision.deny,
-        try ruleDecisionFor(
-            alloc,
-            .{ .rules = &sandbox_rules_buf },
-            "/tmp/workspace",
-            "sandbox",
-            identity,
-            .none,
-        ),
-    );
 }
 
 test "directory tree permission patterns match directory and descendants only" {
@@ -2918,9 +2907,8 @@ test "suggestedSessionGrants returns exact command suggestions with stripped cwd
     const grants = try suggestedSessionGrants(alloc, "/tmp/workspace", "run_command", "/tmp/workspace::git status --short", .command_cwd);
     defer freeGrants(alloc, grants);
 
-    try std.testing.expectEqual(@as(usize, 2), grants.len);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
     try expectGrant(grants[0], "bash", "git status --short");
-    try expectGrant(grants[1], "sandbox", "git status --short");
 }
 
 test "suggestedSessionGrants returns exact broad workspace path suggestions" {

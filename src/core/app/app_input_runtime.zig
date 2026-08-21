@@ -1767,14 +1767,12 @@ pub fn Runtime(comptime App: type) type {
 
         const CompactCommandMenuKind = enum {
             statusline,
-            sandbox,
             usage,
             workspace,
         };
 
         fn activeCompactCommandMenu(app: *App) ?CompactCommandMenuKind {
             if (app.input_runtime.statusline_menu.active) return .statusline;
-            if (app.input_runtime.sandbox_menu.active) return .sandbox;
             if (app.input_runtime.usage_menu.active) return .usage;
             if (app.input_runtime.workspace_menu.active) return .workspace;
             return null;
@@ -1989,7 +1987,6 @@ pub fn Runtime(comptime App: type) type {
             const snapshot = app_commands.settingsCatalogSnapshot(app);
             const change = switch (menu) {
                 .statusline => app.input_runtime.statusline_menu.selectedChange(snapshot),
-                .sandbox => app.input_runtime.sandbox_menu.selectedChange(),
                 .usage, .workspace => unreachable,
             } orelse return;
             if (comptime @hasDecl(App, "notificationPreferences")) {
@@ -2032,7 +2029,6 @@ pub fn Runtime(comptime App: type) type {
         fn moveCompactCommandMenu(app: *App, menu: CompactCommandMenuKind, delta: i32) bool {
             return switch (menu) {
                 .statusline => app.input_runtime.statusline_menu.move(delta),
-                .sandbox => app.input_runtime.sandbox_menu.move(delta),
                 .usage => app.input_runtime.usage_menu.moveModel(
                     delta,
                     app.shell.layout.rows,
@@ -2065,14 +2061,13 @@ pub fn Runtime(comptime App: type) type {
                 }
                 return;
             }
-            if ((menu == .statusline or menu == .sandbox) and
+            if (menu == .statusline and
                 (resolved == .cursor_left or resolved == .cursor_right))
             {
                 const snapshot = app_commands.settingsCatalogSnapshot(app);
                 const delta: i32 = if (resolved == .cursor_left) -1 else 1;
                 const change = switch (menu) {
                     .statusline => app.input_runtime.statusline_menu.changeSelectedOption(&snapshot, delta),
-                    .sandbox => app.input_runtime.sandbox_menu.changeSelectedOption(&snapshot, delta),
                     .usage, .workspace => unreachable,
                 } orelse return;
                 if (comptime @hasDecl(App, "notificationPreferences")) {
@@ -2583,10 +2578,6 @@ pub fn Runtime(comptime App: type) type {
                 app.input_runtime.statusline_menu.close();
                 return true;
             }
-            if (app.input_runtime.sandbox_menu.active) {
-                app.input_runtime.sandbox_menu.close();
-                return true;
-            }
             if (app.input_runtime.usage_menu.active) {
                 app.input_runtime.usage_menu.close(app.alloc);
                 return true;
@@ -2722,7 +2713,6 @@ const routing_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .models, .command = "/models", .help_entry = "/models", .completion_description = "browse available models", .presentation_category = .model },
     .{ .kind = .skills, .command = "/skills", .help_entry = "/skills", .completion_description = "browse and manage skills", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .appearance, .command = "/appearance", .aliases = &.{ "/input", "/maxxing" }, .show_aliases_in_completion = false, .help_entry = "/appearance", .completion_description = "choose appearance", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
-    .{ .kind = .sandbox, .command = "/sandbox", .help_entry = "/sandbox [os|none]", .completion_description = "choose command sandbox behavior", .presentation_category = .security, .has_args = true, .accepts_payload = true },
     .{ .kind = .workspace, .command = "/workspace", .help_entry = "/workspace [list|add PATH|remove PATH|clear]", .completion_description = "manage additional workspace directories", .presentation_category = .workspace, .has_args = true, .accepts_payload = true },
 };
 const routing_test_slash_registry = command_specs.SlashRegistry{ .commands = routing_test_slash_specs[0..] };
@@ -3179,7 +3169,6 @@ const RoutingFakeApp = struct {
     fast_mode: bool = false,
     effort: types.ReasoningEffort = .auto,
     should_exit: bool = false,
-    statusline_sandbox: bool = false,
     statusline_context: bool = false,
     permission_state: app_permission_runtime.State = .{},
     total_input_tokens: u64 = 0,
@@ -3456,6 +3445,7 @@ const RoutingFakeApp = struct {
 
     pub fn applyAuthPickerChoice(self: *RoutingFakeApp, choice: auth_runtime.Choice) !void {
         switch (choice) {
+            .provider => {},
             .source => |source| _ = try self.selectCredentialSource(source),
             .action => |action| self.selected_auth_action = action,
             .team => |index| self.selected_auth_team = index,
@@ -3865,7 +3855,7 @@ test "app_input_runtime routes auth picker navigation before composer history" {
 
     try Runtime(RoutingFakeApp).routeModifiedHistory(&app, .down, 1);
 
-    try std.testing.expect((auth_runtime.Choice{ .action = .setup }).eql(app.auth.pickerView().selected_choice.?));
+    try std.testing.expect((auth_runtime.Choice{ .action = .chatgpt_login }).eql(app.auth.pickerView().selected_choice.?));
     try std.testing.expectEqual(@as(?usize, null), app.input_runtime.composer_history.activeIndex());
 }
 
@@ -3878,7 +3868,7 @@ test "app_input_runtime Tab cycles the active auth picker" {
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\t', 4096, 100);
 
-    try std.testing.expect((auth_runtime.Choice{ .action = .setup }).eql(app.auth.pickerView().selected_choice.?));
+    try std.testing.expect((auth_runtime.Choice{ .action = .chatgpt_login }).eql(app.auth.pickerView().selected_choice.?));
 }
 
 test "app_input_runtime Tab leaves a dismissed slash query unchanged" {
@@ -4017,7 +4007,7 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
     app.auth.openPicker(alloc);
 
-    for (0..3) |_| _ = app.auth.movePicker(1);
+    for (0..6) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .switch_credential }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -4045,7 +4035,7 @@ test "app_input_runtime disabled change team action stays silent" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
     app.auth.openPicker(alloc);
 
-    for (0..2) |_| _ = app.auth.movePicker(1);
+    for (0..5) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .change_team }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -6458,7 +6448,7 @@ test "app_input_runtime does not duplicate the startup file index load" {
     try std.testing.expectEqual(@as(usize, 1), app.file_index_refresh_count);
 }
 
-test "app_input_runtime synchronizes input and sandbox completion with active settings" {
+test "app_input_runtime synchronizes input completion with active settings" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
@@ -6478,14 +6468,6 @@ test "app_input_runtime synchronizes input and sandbox completion with active se
     try Runtime(RoutingFakeApp).handleByte(&app, ' ', 4096, 100);
     try std.testing.expectEqual(
         command_specs.argCompletionIndexForLabel("/input ", "lines").?,
-        app.input_runtime.picker.slash_completion_index,
-    );
-
-    app.permission_state.sandbox_backend = .none;
-    try app.input_runtime.textReplacementState().replace(alloc, "/sandbox");
-    try Runtime(RoutingFakeApp).handleByte(&app, ' ', 4096, 100);
-    try std.testing.expectEqual(
-        command_specs.argCompletionIndexForLabel("/sandbox ", "none").?,
         app.input_runtime.picker.slash_completion_index,
     );
 }
@@ -7207,6 +7189,36 @@ test "app_input_runtime decoded kitty Escape follows the raw Escape policy" {
     }
 }
 
+test "app_input_runtime Ghostty Escape press closes the usage dashboard" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    try app.input_runtime.usage_menu.openError(
+        alloc,
+        .days_30,
+        "usage is unavailable",
+    );
+
+    try feedRoutingBytes(&app, "\x1b[27;1:1u");
+
+    try std.testing.expect(!app.input_runtime.usage_menu.active);
+}
+
+test "app_input_runtime Ghostty Escape release leaves the usage dashboard open" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    try app.input_runtime.usage_menu.openError(
+        alloc,
+        .days_30,
+        "usage is unavailable",
+    );
+
+    try feedRoutingBytes(&app, "\x1b[27;1:3u");
+
+    try std.testing.expect(app.input_runtime.usage_menu.active);
+}
+
 test "app_input_runtime decoded kitty Backspace edits the draft without cancelling" {
     const alloc = std.testing.allocator;
     const sequences = [_][]const u8{ "\x1b[127u", "\x1b[127;1u" };
@@ -7680,7 +7692,7 @@ fn openRoutingAuthPicker(app: *RoutingFakeApp) !void {
     app.auth.source_inventory.insert(.ai_gateway_api_key);
     app.auth.openPicker(app.alloc);
     try std.testing.expect(app.auth.movePicker(1));
-    try std.testing.expectEqual(@as(usize, 4), app.auth.pickerView().choiceCount());
+    try std.testing.expectEqual(@as(usize, 7), app.auth.pickerView().choiceCount());
     try std.testing.expectEqual(@as(usize, 1), app.auth.pickerView().selectedIndex());
 }
 

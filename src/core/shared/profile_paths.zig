@@ -4,6 +4,8 @@ const Allocator = std.mem.Allocator;
 
 pub const root_dir_name = ".fx";
 pub const auth_file_name = "auth.json";
+pub const chatgpt_auth_file_name = "chatgpt-auth.json";
+pub const grok_auth_file_name = "grok-auth.json";
 pub const api_key_file_name = "api-key";
 pub const sessions_dir_name = "sessions";
 pub const prompt_history_file_name = "history.jsonl";
@@ -59,6 +61,14 @@ pub fn mcpCredentialsPath(alloc: Allocator, state_root: []const u8) PathError![]
 
 pub fn authPath(alloc: Allocator, state_root: []const u8) PathError![]u8 {
     return joinRoot(alloc, state_root, &.{auth_file_name});
+}
+
+pub fn chatgptAuthPath(alloc: Allocator, state_root: []const u8) PathError![]u8 {
+    return joinRoot(alloc, state_root, &.{chatgpt_auth_file_name});
+}
+
+pub fn grokAuthPath(alloc: Allocator, state_root: []const u8) PathError![]u8 {
+    return joinRoot(alloc, state_root, &.{grok_auth_file_name});
 }
 
 pub fn apiKeyPath(alloc: Allocator, state_root: []const u8) PathError![]u8 {
@@ -136,6 +146,14 @@ test "profile path helpers keep every entry under a legacy root" {
     defer alloc.free(auth);
     try std.testing.expectEqualStrings("/tmp/fake-home/.fx/auth.json", auth);
 
+    const chatgpt_auth = try chatgptAuthPath(alloc, roots.state);
+    defer alloc.free(chatgpt_auth);
+    try std.testing.expectEqualStrings("/tmp/fake-home/.fx/chatgpt-auth.json", chatgpt_auth);
+
+    const grok_auth = try grokAuthPath(alloc, roots.state);
+    defer alloc.free(grok_auth);
+    try std.testing.expectEqualStrings("/tmp/fake-home/.fx/grok-auth.json", grok_auth);
+
     const api_key = try apiKeyPath(alloc, roots.state);
     defer alloc.free(api_key);
     try std.testing.expectEqualStrings("/tmp/fake-home/.fx/api-key", api_key);
@@ -188,6 +206,11 @@ test "profile path helpers freeze the XDG layout too" {
         .{ .path = try mcpConfigPath(alloc, roots.config), .expected = "/x/cfg/fx/mcp.json" },
         .{ .path = try backupsDir(alloc, roots.config), .expected = "/x/cfg/fx/backups" },
         .{ .path = try authPath(alloc, roots.state), .expected = "/x/st/fx/auth.json" },
+        .{
+            .path = try chatgptAuthPath(alloc, roots.state),
+            .expected = "/x/st/fx/chatgpt-auth.json",
+        },
+        .{ .path = try grokAuthPath(alloc, roots.state), .expected = "/x/st/fx/grok-auth.json" },
         .{ .path = try apiKeyPath(alloc, roots.state), .expected = "/x/st/fx/api-key" },
         .{ .path = try mcpCredentialsDir(alloc, roots.state), .expected = "/x/st/fx/mcp-credentials" },
         .{

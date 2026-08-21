@@ -181,7 +181,6 @@ pub fn welcomeMessage(alloc: std.mem.Allocator) ![]u8 {
 pub const StatuslineItems = struct {
     workspace_label: []const u8 = "",
     git_branch: ?[]const u8 = null,
-    sandbox_label: ?[]const u8 = null,
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
@@ -411,11 +410,6 @@ pub fn buildHintLine(
 
     if (statusline.session_title) |title| {
         appendStatusSegment(out, &end, display_width.prefixByWidth(title, max_session_title_cells));
-    }
-
-    if (statusline.sandbox_label) |sb_label| {
-        var sandbox_buf: [64]u8 = undefined;
-        appendStatusSegment(out, &end, std.fmt.bufPrint(&sandbox_buf, "sandbox:{s}", .{sb_label}) catch "");
     }
 
     if (statusline.context_used > 0) {
@@ -918,14 +912,13 @@ test "buildHintLine shows full context usage" {
     try std.testing.expectEqualStrings("ask · opus 4.8 · Context: 43k/1000k 4%", line);
 }
 
-test "buildHintLine shows the session title before sandbox and context" {
+test "buildHintLine shows the session title" {
     var buf: [256]u8 = undefined;
     const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
         .session_title = "add a session name display",
-        .sandbox_label = "none",
     }, 200, &buf);
     try std.testing.expectEqualStrings(
-        "ask · gpt-5 · add a session name display · sandbox:none",
+        "ask · gpt-5 · add a session name display",
         line,
     );
 }
@@ -1013,13 +1006,12 @@ test "buildHintLine labels detached HEAD" {
 test "buildHintLine keeps system labels and dot separators" {
     var buf: [256]u8 = undefined;
     const line = buildHintLine(false, false, false, "anthropic/claude-opus-4.8", .auto, 2, null, true, true, types.ReasoningEffort.literal("low"), true, .{
-        .sandbox_label = "none",
         .context_used = 43_000,
         .context_total = 1_000_000,
     }, 256, &buf);
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
-        "run /login · queued 2 · {s}auto{s} · opus 4.8 · low · ⚡︎ · sandbox:none · Context: 43k/1000k 4%",
+        "run /login · queued 2 · {s}auto{s} · opus 4.8 · low · ⚡︎ · Context: 43k/1000k 4%",
         .{ permission_auto_style, statusline_style },
     );
     defer std.testing.allocator.free(expected);

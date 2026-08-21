@@ -80,6 +80,8 @@ const legacy_profile_entries = [_][]const u8{
     profile_paths.settings_file_name,
     profile_paths.mcp_config_file_name,
     profile_paths.auth_file_name,
+    profile_paths.chatgpt_auth_file_name,
+    profile_paths.grok_auth_file_name,
     profile_paths.api_key_file_name,
     profile_paths.sessions_dir_name,
     profile_paths.mcp_credentials_dir_name,
@@ -433,6 +435,30 @@ test "legacy detection accepts a profile holding only sessions" {
     defer testing.allocator.free(expected);
     try expectRoots(roots, expected, expected, expected);
     try testing.expectEqual(Layout.legacy, roots.layout);
+}
+
+test "legacy detection accepts a profile holding only a provider session" {
+    for ([_][]const u8{
+        profile_paths.chatgpt_auth_file_name,
+        profile_paths.grok_auth_file_name,
+    }) |entry| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(std.testing.io, "home/.fx");
+
+        var fx = try tmp.dir.openDir(std.testing.io, "home/.fx", .{});
+        defer fx.close(std.testing.io);
+        try makeLegacyEntry(fx, entry, .file);
+
+        const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
+        defer testing.allocator.free(home);
+
+        try testing.expect(hasLegacyProfile(testing.allocator, home));
+
+        var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
+        defer roots.deinit(testing.allocator);
+        try testing.expectEqual(Layout.legacy, roots.layout);
+    }
 }
 
 test "legacy detection accepts a profile holding only global instructions" {

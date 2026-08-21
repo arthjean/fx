@@ -85,7 +85,9 @@ If you cannot manage labels, a maintainer or repository agent will apply the lab
 
 * `src/gateway/`: AI Gateway client transport
 
-* `skills/`: optional workspace-level skill root if the project wants one
+* `.fx/skills/`: optional fx-native workspace-level skill root
+
+* `skills/`: optional shared workspace-level skill root
 
 ## Collaboration Rules
 
@@ -120,14 +122,14 @@ On Linux, the profile is split across the three XDG Base Directory roots, with `
 | Root | Variable | Default | Holds |
 | --- | --- | --- | --- |
 | config | `XDG_CONFIG_HOME` | `~/.config/fx` | `settings.json`, `mcp.json`, `AGENTS.md`, `backups/` |
-| state | `XDG_STATE_HOME` | `~/.local/state/fx` | `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `api-key`, `mcp-credentials/`, `terminal-host/` |
+| state | `XDG_STATE_HOME` | `~/.local/state/fx` | `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, `terminal-host/` |
 | data | `XDG_DATA_HOME` | `~/.local/share/fx` | `skills/`, `memories.json` |
 
 A variable that is unset, empty, or holds a relative path is ignored in favor of the default. The terminal host takes its socket directory from `XDG_RUNTIME_DIR`, falling back to a private per-user directory under `/tmp`.
 
 Two rules override that resolution. A legacy `~/.fx` holding a recognized profile entry collapses all three roots back to `~/.fx`, and fx never moves, copies, or deletes anything to migrate. macOS and every other non-Linux target resolve all three roots to `~/.fx` whatever the XDG environment exports.
 
-Moving a legacy profile is a manual three-destination operation, never a single `mv`. Send `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` to the config root; `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` to the state root; and `skills/` and `memories.json` to the data root. The XDG layout activates only once `~/.fx` holds no recognized entry.
+Moving a legacy profile is a manual three-destination operation, never a single `mv`. Send `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` to the config root; `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` to the state root; and `skills/` and `memories.json` to the data root. The XDG layout activates only once `~/.fx` holds no recognized entry.
 
 `fx doctor` reports the active layout and the three resolved roots. Use it instead of assuming a path when debugging.
 
@@ -159,13 +161,13 @@ Subagent children are ordinary sessions with their own `<state root>/sessions/<c
 
 There are two distinct skill categories in `fx`:
 
-* `fx` roots that belong to the product itself: `skills/`, `<data root>/skills`
+* `fx` roots that belong to the product itself: `.fx/skills`, `skills/`, `<data root>/skills`
 
 * compatibility roots discovered for other agent installs: `.opencode/skills`, `.codex/skills`, `.claude/skills`, `.agents/skills`, `.claw/skills`, plus their global equivalents
 
 `/skills list` should make that distinction visible to the user.
 
-`/skills add` and `/skills install` install full skill directories into the profile-owned `<data root>/skills` managed root, not just `SKILL.md`. Workspace `skills/` remains discoverable project-local instructions, not a managed install target.
+`/skills add` and `/skills install` install full skill directories into the profile-owned `<data root>/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
 
 The interactive agent can also install skills via the `install_skill` tool when the user asks to install one in conversation, including pasted `npx skills add ...` syntax.
 
@@ -263,7 +265,7 @@ Security is permission-first.
 
 * the main agent may pass that exact request ID through `ask_user_question` to open the existing permission screen; generic question text cannot authorize an action, and the resulting once or always approval is revalidated and consumed only by the exact bound action
 
-* after three consecutive all-blocked response groups, the next unresolved sensitive action skips another automatic review and uses the existing human approval path; any completed successful tool resets that recovery count, and configured and saved-session rules remain authoritative
+* bounded consecutive all-blocked response groups end the turn with ordinary blocker text and never open the human approval path automatically; any completed successful tool resets that recovery count, and configured and saved-session rules remain authoritative
 
 * the sandbox backend is configured independently; yolo uses an effective backend of `none` without rewriting the saved sandbox setting
 

@@ -6,6 +6,14 @@ const tool_args = @import("../../core/tooling/tool_args.zig");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
+const max_memory_store_bytes: usize = 1024 * 1024;
+
+const MemoryStoreError = error{
+    OutOfMemory,
+    MemoryStoreMalformed,
+    MemoryStoreTooLarge,
+    MemoryStoreUnreadable,
+};
 
 pub const Input = struct {
     action: []u8,
@@ -70,15 +78,22 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     const input = erased.as(Input);
     const output = runMemory(ctx.allocator, input.action, input.fact) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.MemoryClearFailed => {
-            const path = resolvedMemoriesPath(ctx.allocator);
-            defer if (path) |owned| ctx.allocator.free(owned);
-            return .{ .failure = try std.fmt.allocPrint(
-                ctx.allocator,
-                "memory clear failed: saved memories were not removed; ensure {s} is a removable file and retry",
-                .{path orelse "the profile memories.json"},
-            ) };
-        },
+        error.MemoryStoreMalformed => return .{ .failure = try memoryStoreFailure(
+            ctx.allocator,
+            "memory store is malformed; {s} was not modified. Repair or remove the file, then retry",
+        ) },
+        error.MemoryStoreTooLarge => return .{ .failure = try memoryStoreFailure(
+            ctx.allocator,
+            "memory store exceeds the 1 MiB limit; {s} was not modified. Reduce or remove the file, then retry",
+        ) },
+        error.MemoryStoreUnreadable => return .{ .failure = try memoryStoreFailure(
+            ctx.allocator,
+            "memory store could not be read; {s} was not modified. Check the file type and permissions, then retry",
+        ) },
+        error.MemoryClearFailed => return .{ .failure = try memoryStoreFailure(
+            ctx.allocator,
+            "memory clear failed: saved memories were not removed; ensure {s} is a removable file and retry",
+        ) },
         else => return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "memory failed: {s}", .{@errorName(err)}) },
     };
     return .{ .success = output };
@@ -86,6 +101,15 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
 
 /// Absolute `memories.json` under the resolved data root, or null when no profile resolves.
 /// A user-facing message must name the path the active layout uses, never a fixed literal.
+/// Every store failure names the file the user has to repair, so the message has to follow the
+/// resolved data root rather than a hardcoded `~/.fx`. A home fx cannot resolve degrades to a
+/// generic name instead of losing the failure.
+fn memoryStoreFailure(alloc: Allocator, comptime template: []const u8) Allocator.Error![]u8 {
+    const path = resolvedMemoriesPath(alloc);
+    defer if (path) |owned| alloc.free(owned);
+    return std.fmt.allocPrint(alloc, template, .{path orelse "the profile memories.json"});
+}
+
 fn resolvedMemoriesPath(alloc: Allocator) ?[]u8 {
     const home = io_mod.getenv("HOME") orelse return null;
     const roots = profile_roots.processRoots(home) catch return null;
@@ -109,7 +133,7 @@ fn runMemory(alloc: Allocator, action: []const u8, fact: ?[]const u8) ![]u8 {
 
     if (std.mem.eql(u8, action, "save")) {
         const fact_value = fact orelse return std.fmt.allocPrint(alloc, "no fact provided", .{});
-        var existing = loadMemories(alloc, memories_path);
+        var existing = try loadMemories(alloc, memories_path);
         defer freeMemories(alloc, &existing);
 
         for (existing.items) |memory| {
@@ -122,7 +146,7 @@ fn runMemory(alloc: Allocator, action: []const u8, fact: ?[]const u8) ![]u8 {
     }
 
     if (std.mem.eql(u8, action, "list")) {
-        var existing = loadMemories(alloc, memories_path);
+        var existing = try loadMemories(alloc, memories_path);
         defer freeMemories(alloc, &existing);
 
         if (existing.items.len == 0) return std.fmt.allocPrint(alloc, "No saved memories", .{});
@@ -152,20 +176,36 @@ fn isSupportedAction(action: []const u8) bool {
         std.mem.eql(u8, action, "clear");
 }
 
-fn loadMemories(alloc: Allocator, path: []const u8) std.ArrayList([]u8) {
+fn loadMemories(alloc: Allocator, path: []const u8) MemoryStoreError!std.ArrayList([]u8) {
     var list: std.ArrayList([]u8) = .empty;
-    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return list;
+    errdefer freeMemories(alloc, &list);
+
+    var file = io_mod.openExistingRegularFile(std.Io.Dir.cwd(), path, .read_only) catch |err| switch (err) {
+        error.FileNotFound => return list,
+        else => return error.MemoryStoreUnreadable,
+    };
     defer file.close(io_mod.getIo());
-    const content = io_mod.readFileToEnd(alloc, &file, 1024 * 1024) catch return list;
+    const content = io_mod.readFileToEnd(alloc, &file, max_memory_store_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StreamTooLong => return error.MemoryStoreTooLarge,
+        else => return error.MemoryStoreUnreadable,
+    };
     defer alloc.free(content);
 
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch return list;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MemoryStoreMalformed,
+    };
     defer parsed.deinit();
 
-    if (parsed.value != .array) return list;
+    if (parsed.value != .array) return error.MemoryStoreMalformed;
     for (parsed.value.array.items) |item| {
-        if (item != .string) continue;
-        list.append(alloc, alloc.dupe(u8, item.string) catch continue) catch continue;
+        if (item != .string) return error.MemoryStoreMalformed;
+        const owned = try alloc.dupe(u8, item.string);
+        list.append(alloc, owned) catch |err| {
+            alloc.free(owned);
+            return err;
+        };
     }
     return list;
 }
@@ -196,11 +236,7 @@ fn saveMemories(alloc: Allocator, path: []const u8, memories: []const []u8) !voi
     const json = try out.toOwnedSlice();
     defer alloc.free(json);
 
-    io_mod.writeFileAtomic(alloc, path, json) catch {
-        var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), path, .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), json);
-    };
+    try io_mod.writeFileAtomic(alloc, path, json);
 }
 
 pub fn readsOnly(erased: tool_dispatch.ToolInput) bool {
@@ -327,6 +363,77 @@ test "memory clear fails closed when state cannot be deleted" {
         .{},
     );
     survivor.close(io_mod.getIo());
+}
+
+test "memory corrupt store fails closed and preserves original bytes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    const corrupt_store = "[\"recoverable prior memory\",\n";
+    try tmp.dir.writeFile(io_mod.getIo(), .{
+        .sub_path = "home/.fx/memories.json",
+        .data = corrupt_store,
+    });
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    try setTestHome(home);
+    defer setTestHome(null) catch {};
+
+    var list_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer list_arena_state.deinit();
+    try std.testing.expectError(
+        error.MemoryStoreMalformed,
+        execute(list_arena_state.allocator(), "{\"action\":\"list\"}"),
+    );
+
+    var save_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer save_arena_state.deinit();
+    try std.testing.expectError(
+        error.MemoryStoreMalformed,
+        execute(save_arena_state.allocator(), "{\"action\":\"save\",\"fact\":\"replacement\"}"),
+    );
+
+    var file = try tmp.dir.openFile(io_mod.getIo(), "home/.fx/memories.json", .{});
+    defer file.close(io_mod.getIo());
+    const after = try io_mod.readFileToEnd(alloc, &file, 4096);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(corrupt_store, after);
+}
+
+test "memory loader distinguishes missing oversized and unreadable stores" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/" ++ profile_roots.test_relative_roots.data);
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const roots = try profile_roots.processRoots(home);
+    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
+    defer alloc.free(memories_path);
+
+    var missing = try loadMemories(alloc, memories_path);
+    defer freeMemories(alloc, &missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.items.len);
+
+    {
+        var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), memories_path, .{});
+        defer file.close(io_mod.getIo());
+        try file.setLength(io_mod.getIo(), max_memory_store_bytes + 1);
+    }
+    try std.testing.expectError(
+        error.MemoryStoreTooLarge,
+        loadMemories(alloc, memories_path),
+    );
+
+    try std.Io.Dir.deleteFileAbsolute(io_mod.getIo(), memories_path);
+    try std.Io.Dir.createDirAbsolute(io_mod.getIo(), memories_path, .default_dir);
+    try std.testing.expectError(
+        error.MemoryStoreUnreadable,
+        loadMemories(alloc, memories_path),
+    );
 }
 
 test "memory owner preserves active output behavior" {

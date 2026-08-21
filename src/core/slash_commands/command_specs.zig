@@ -17,6 +17,7 @@ pub const TopLevelKind = enum {
     status,
     permissions,
     models,
+    provider,
     doctor,
     background,
     teams,
@@ -68,7 +69,6 @@ pub const SlashKind = enum {
     paste,
     fast,
     appearance,
-    sandbox,
     statusline,
     notifications,
     workspace,
@@ -534,9 +534,6 @@ pub fn slashCompletionCount(registry: SlashRegistry, prefix: []const u8) usize {
     if (allowlistArgCompletionPrefix(prefix)) |query| {
         return allowlistArgCompletionCount(query);
     }
-    if (sandboxArgCompletionPrefix(prefix)) |query| {
-        return sandboxArgCompletionCount(query);
-    }
     if (statuslineArgCompletionPrefix(prefix)) |query| {
         return statuslineArgCompletionCount(query);
     }
@@ -571,9 +568,6 @@ pub fn nthSlashCompletion(registry: SlashRegistry, prefix: []const u8, n: usize)
     if (allowlistArgCompletionPrefix(prefix)) |query| {
         return nthAllowlistArgCompletion(query, n);
     }
-    if (sandboxArgCompletionPrefix(prefix)) |query| {
-        return nthSandboxArgCompletion(query, n);
-    }
     if (statuslineArgCompletionPrefix(prefix)) |query| {
         return nthStatuslineArgCompletion(query, n);
     }
@@ -600,10 +594,9 @@ pub fn nthSlashCompletion(registry: SlashRegistry, prefix: []const u8, n: usize)
 }
 
 /// Returns the byte offset where the argument portion begins for
-/// arg-completion commands such as `/sandbox `. Returns 0 when
+/// known arg-completion commands. Returns 0 when
 /// the prefix is not an arg-completion command.
 pub fn argCompletionAnchor(prefix: []const u8) usize {
-    if (sandboxArgCompletionPrefix(prefix) != null) return "/sandbox ".len;
     if (statuslineArgCompletionPrefix(prefix) != null) return "/statusline ".len;
     if (notificationsArgCompletionPrefix(prefix) != null) return "/sound ".len;
     if (permissionsArgCompletionPrefix(prefix) != null) return "/permissions ".len;
@@ -622,9 +615,6 @@ pub fn argCompletionAnchor(prefix: []const u8) usize {
 pub fn nthSlashCompletionLabel(registry: SlashRegistry, prefix: []const u8, n: usize) ?[]const u8 {
     if (allowlistArgCompletionPrefix(prefix)) |query| {
         return nthAllowlistArgLabel(query, n);
-    }
-    if (sandboxArgCompletionPrefix(prefix)) |query| {
-        return nthSandboxArgLabel(query, n);
     }
     if (statuslineArgCompletionPrefix(prefix)) |query| {
         return nthStatuslineArgLabel(query, n);
@@ -652,7 +642,6 @@ pub fn nthSlashCompletionLabel(registry: SlashRegistry, prefix: []const u8, n: u
 
 pub fn nthSlashCompletionDescription(registry: SlashRegistry, prefix: []const u8, n: usize) ?[]const u8 {
     if (allowlistArgCompletionPrefix(prefix) != null) return null;
-    if (sandboxArgCompletionPrefix(prefix) != null) return null;
     if (statuslineArgCompletionPrefix(prefix) != null) return null;
     if (notificationsArgCompletionPrefix(prefix) != null) return null;
     if (permissionsArgCompletionPrefix(prefix) != null) return null;
@@ -728,15 +717,10 @@ fn allowlistCompletionHasArgs(command: []const u8) bool {
     return false;
 }
 
-const sandbox_arg_completions = [_][]const u8{
-    "/sandbox os",
-    "/sandbox none",
-};
-
 const statusline_arg_completions = [_][]const u8{
-    "/statusline sandbox",
     "/statusline context",
     "/statusline session",
+    "/statusline workspace",
 };
 
 const notifications_arg_completions = [_][]const u8{
@@ -901,10 +885,6 @@ pub fn allowlistArgCompletionPrefix(prefix: []const u8) ?[]const u8 {
     return rawArgCompletionPrefix(prefix, "/allowlist");
 }
 
-pub fn sandboxArgCompletionPrefix(prefix: []const u8) ?[]const u8 {
-    return argCompletionPrefix(prefix, "/sandbox");
-}
-
 pub fn statuslineArgCompletionPrefix(prefix: []const u8) ?[]const u8 {
     return argCompletionPrefix(prefix, "/statusline");
 }
@@ -939,10 +919,6 @@ fn argCompletionCount(completions: []const []const u8, command_with_space_len: u
         if (argCompletionMatches(completion, command_with_space_len, query)) count += 1;
     }
     return count;
-}
-
-fn sandboxArgCompletionCount(query: []const u8) usize {
-    return argCompletionCount(&sandbox_arg_completions, "/sandbox ".len, query);
 }
 
 fn statuslineArgCompletionCount(query: []const u8) usize {
@@ -986,15 +962,6 @@ fn nthArgCompletion(completions: []const []const u8, command_with_space_len: usi
         idx += 1;
     }
     return null;
-}
-
-fn nthSandboxArgCompletion(query: []const u8, n: usize) ?[]const u8 {
-    return nthArgCompletion(&sandbox_arg_completions, "/sandbox ".len, query, n);
-}
-
-fn nthSandboxArgLabel(query: []const u8, n: usize) ?[]const u8 {
-    const full = nthSandboxArgCompletion(query, n) orelse return null;
-    return full["/sandbox ".len..];
 }
 
 fn nthStatuslineArgCompletion(query: []const u8, n: usize) ?[]const u8 {
@@ -1086,9 +1053,6 @@ pub fn argCompletionIndexForLabel(prefix: []const u8, label: []const u8) ?usize 
     }
     if (maxxingArgCompletionPrefix(prefix)) |query| {
         return indexOfArgLabel(&maxxing_arg_completions, "/maxxing ".len, query, label);
-    }
-    if (sandboxArgCompletionPrefix(prefix)) |query| {
-        return indexOfArgLabel(&sandbox_arg_completions, "/sandbox ".len, query, label);
     }
     if (statuslineArgCompletionPrefix(prefix)) |query| {
         return indexOfArgLabel(&statusline_arg_completions, "/statusline ".len, query, label);
@@ -1895,7 +1859,7 @@ test "slash completion categories follow canonical entries" {
 test "help catalog groups visible commands and searches all command metadata" {
     const registry = testSlashRegistry();
 
-    try std.testing.expectEqual(@as(usize, 39), helpCatalogCount(registry, ""));
+    try std.testing.expectEqual(@as(usize, 38), helpCatalogCount(registry, ""));
     try std.testing.expectEqualStrings("/help", helpCatalogSpecAt(registry, "", 0).?.command);
     try std.testing.expectEqual(@as(usize, 5), helpCatalogCategoryCount(registry, "", .general));
     try std.testing.expectEqual(@as(usize, 4), helpCatalogCount(registry, "appearance"));
@@ -2030,8 +1994,6 @@ test "slash completion prefix normalizes leading whitespace and preserves argume
     const registry = testSlashRegistry();
 
     try std.testing.expectEqualStrings("/he", slashCompletionPrefix(registry, "\n   /he").?);
-    try std.testing.expectEqualStrings("/sandbox ", slashCompletionPrefix(registry, "/sandbox ").?);
-    try std.testing.expectEqualStrings("/sandbox\nos", slashCompletionPrefix(registry, "/sandbox\nos").?);
     try std.testing.expectEqualStrings("/resume-helper", slashCompletionPrefix(registry, "/resume-helper").?);
     try std.testing.expectEqualStrings("/not-a-command ", slashCompletionPrefix(registry, "/not-a-command ").?);
 }
@@ -2051,15 +2013,6 @@ test "slash completions skip hidden subcommands" {
     try std.testing.expect(nthSlashCompletion(testSlashRegistry(), "/background", 1) == null);
     try std.testing.expectEqual(@as(usize, 0), slashCompletionCount(testSlashRegistry(), "/background s"));
     try std.testing.expect(nthSlashCompletion(testSlashRegistry(), "/background s", 0) == null);
-}
-
-test "slash completions include sandbox public arguments only" {
-    try std.testing.expectEqual(@as(usize, 2), slashCompletionCount(testSlashRegistry(), "/sandbox "));
-    try std.testing.expectEqualStrings("/sandbox os", nthSlashCompletion(testSlashRegistry(), "/sandbox ", 0).?);
-    try std.testing.expectEqualStrings("/sandbox none", nthSlashCompletion(testSlashRegistry(), "/sandbox ", 1).?);
-    try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/sandbox o"));
-    try std.testing.expectEqualStrings("/sandbox os", nthSlashCompletion(testSlashRegistry(), "/sandbox o", 0).?);
-    try std.testing.expectEqual(@as(usize, 0), slashCompletionCount(testSlashRegistry(), "/sandbox m"));
 }
 
 test "slash completions include allowlist staged arguments" {
@@ -2237,8 +2190,6 @@ test "slash completion labels strip argument prefixes" {
     try std.testing.expectEqualStrings("lines", nthSlashCompletionLabel(testSlashRegistry(), "/input ", 0).?);
     try std.testing.expectEqualStrings("tint", nthSlashCompletionLabel(testSlashRegistry(), "/input ", 1).?);
     try std.testing.expectEqualStrings("tint", nthSlashCompletionLabel(testSlashRegistry(), "/input t", 0).?);
-    try std.testing.expectEqualStrings("os", nthSlashCompletionLabel(testSlashRegistry(), "/sandbox ", 0).?);
-    try std.testing.expectEqualStrings("none", nthSlashCompletionLabel(testSlashRegistry(), "/sandbox ", 1).?);
     try std.testing.expectEqualStrings("ask", nthSlashCompletionLabel(testSlashRegistry(), "/permissions ", 0).?);
     try std.testing.expectEqualStrings("auto", nthSlashCompletionLabel(testSlashRegistry(), "/permissions ", 1).?);
     try std.testing.expectEqualStrings("remember", nthSlashCompletionLabel(testSlashRegistry(), "/permissions ", 2).?);

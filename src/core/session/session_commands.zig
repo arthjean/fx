@@ -8,11 +8,12 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const model_provider = @import("../config/model_provider.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const permissions = @import("../permissions/permissions.zig");
-const sandbox = @import("../permissions/sandbox.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const prompt_history_runtime = @import("../app/prompt_history_runtime.zig");
+const provider_runtime = @import("../app/provider_runtime.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const types = @import("../shared/types.zig");
@@ -176,17 +177,19 @@ fn appendShadowedUserSources(
     try appendShadowedUserSource(writer, "input_appearance", patch.input_appearance != null, sources.input_appearance, &wrote_header);
     try appendShadowedUserSource(writer, "prompt_history", patch.prompt_history_enabled != null, sources.prompt_history_enabled, &wrote_header);
     if (patch.statusline_item) |item| {
-        const source = switch (item.item) {
-            .sandbox => sources.statusline_sandbox,
+        const source: ?config_runtime.ConfigSource = switch (item.item) {
             .context => sources.statusline_context,
             .session => sources.statusline_session,
+            .workspace => null,
         };
-        const field = switch (item.item) {
-            .sandbox => "statusLine.sandbox",
-            .context => "statusLine.context",
-            .session => "statusLine.session",
-        };
-        try appendShadowedUserSource(writer, field, true, source, &wrote_header);
+        if (source) |resolved| {
+            const field = switch (item.item) {
+                .context => "statusLine.context",
+                .session => "statusLine.session",
+                .workspace => unreachable,
+            };
+            try appendShadowedUserSource(writer, field, true, resolved, &wrote_header);
+        }
     }
     try appendShadowedUserSource(
         writer,
@@ -267,17 +270,14 @@ pub fn Commands(comptime App: type) type {
         pub fn showStatus(app: *App) !void {
             const auth = app.auth.statusSnapshot();
             const text = try (output_contracts.StatusSnapshot{
-                .model = app.selected_model.items,
+                .model = provider_runtime.model(app),
+                .provider = provider_runtime.provider(app),
                 .update_channel = update_channel_label(app),
                 .build_channel = if (@hasDecl(App, "build_update_channel")) App.build_update_channel.label() else "stable",
                 .build_revision = if (@hasDecl(App, "build_revision")) App.build_revision else "",
                 .auth = auth,
                 .auth_help = auth.missingHelp(.interactive),
                 .permission_mode = app.permission_engine.mode,
-                .sandbox_backend = sandbox.effectiveBackend(
-                    app.permission_engine.mode,
-                    app.permission_state.sandbox_backend,
-                ),
                 .workspace_root = app.workspace_root,
                 .history_turns = app.session.historyLen(),
                 .session_permission_grants = app.permission_engine.grants.items.len,
@@ -332,7 +332,7 @@ pub fn Commands(comptime App: type) type {
 
         pub fn handleModel(app: *App, query: []const u8) !void {
             if (query.len == 0) {
-                try app.writeDomainNotice(.{ .topic = "model", .tone = .neutral, .body = app.selected_model.items }, true);
+                try app.writeDomainNotice(.{ .topic = "model", .tone = .neutral, .body = provider_runtime.model(app) }, true);
                 return;
             }
 
@@ -679,7 +679,7 @@ pub fn Commands(comptime App: type) type {
         }
 
         pub fn toggleFast(app: *App) !void {
-            try toggleFastForModel(app, app.selected_model.items, true);
+            try toggleFastForModel(app, provider_runtime.model(app), true);
         }
 
         fn toggleFastForModel(app: *App, model: []const u8, announce: bool) !void {
@@ -712,8 +712,8 @@ pub fn Commands(comptime App: type) type {
                 .{
                     if (previous) "true" else "false",
                     if (app.fast_mode) "true" else "false",
-                    app.selected_model.items,
-                    if (model_capabilities.resolveForApp(App, app, app.selected_model.items).supports_fast_mode) "true" else "false",
+                    provider_runtime.model(app),
+                    if (model_capabilities.resolveForApp(App, app, provider_runtime.model(app)).supports_fast_mode) "true" else "false",
                 },
             );
 
@@ -759,7 +759,10 @@ pub fn Commands(comptime App: type) type {
 
         pub fn selectModelFromPicker(app: *App, model: []const u8, effort: types.ReasoningEffort, fast_mode: bool) !void {
             try setResolvedModelRuntime(app, model, true);
-            var patch = app_session_runtime.SessionPreferencePatch{ .model = model };
+            var patch = app_session_runtime.SessionPreferencePatch{
+                .provider = provider_runtime.provider(app),
+                .model = model,
+            };
             const capabilities = model_capabilities.resolveForApp(App, app, model);
             if (capabilities.reasoning_efforts.len == 0) {
                 if (capabilities.supports_fast_mode) {
@@ -925,7 +928,7 @@ pub fn Commands(comptime App: type) type {
 
             const startup_scrollback_label = if (settings.startup_scrollback orelse true) "on" else "off";
             const msg = try std.fmt.allocPrint(app.alloc, "model: {s}\nmodel_config_source: {s}\npermission_mode: {s}\nworkspace: {s}\nstep_limit: {d}\nstartup_scrollback: {s}", .{
-                app.selected_model.items,
+                provider_runtime.model(app),
                 @tagName(detailed.sources.model),
                 permissions.permissionModeLabel(app.permission_engine.mode),
                 app.workspace_root,
@@ -1032,7 +1035,10 @@ pub fn Commands(comptime App: type) type {
             try setResolvedModelRuntime(app, resolved, announce);
             try persistPreferenceTargets(
                 app,
-                .{ .model = resolved },
+                .{
+                    .provider = provider_runtime.provider(app),
+                    .model = resolved,
+                },
                 "model",
                 !announce,
             );
@@ -1051,11 +1057,7 @@ pub fn Commands(comptime App: type) type {
                 var committed = app_session_runtime.PreferenceCommitResult{};
                 const attempt = config_runtime.attemptUserPreferences(
                     app.alloc,
-                    .{
-                        .model = patch.model,
-                        .effort = patch.effort,
-                        .fast_mode = patch.fast_mode,
-                    },
+                    patch.userSettingsPatch(),
                 );
                 switch (attempt) {
                     .outcome => |outcome| committed.settings_outcome = outcome,
@@ -1085,11 +1087,7 @@ pub fn Commands(comptime App: type) type {
                 _ = try reportUserSettingsCommit(
                     app,
                     label,
-                    .{
-                        .model = patch.model,
-                        .effort = patch.effort,
-                        .fast_mode = patch.fast_mode,
-                    },
+                    patch.userSettingsPatch(),
                     outcome,
                     result.session_error,
                     announce_commit,
@@ -1112,14 +1110,10 @@ pub fn Commands(comptime App: type) type {
         }
 
         fn setResolvedModelRuntime(app: *App, resolved: []const u8, announce: bool) !void {
-            if (!std.mem.eql(u8, app.selected_model.items, resolved)) {
-                const stable = try app.alloc.dupe(u8, resolved);
-                defer app.alloc.free(stable);
-                try app.selected_model.ensureTotalCapacity(app.alloc, stable.len);
-                app.selected_model.clearRetainingCapacity();
-                app.selected_model.appendSliceAssumeCapacity(stable);
+            if (!std.mem.eql(u8, provider_runtime.model(app), resolved)) {
+                try provider_runtime.replaceModel(app, resolved);
             }
-            const selected = app.selected_model.items;
+            const selected = provider_runtime.model(app);
             try app.worker.syncQueuedPromptModel(std.heap.c_allocator, selected);
             if (comptime @hasDecl(App, "persistAcceptedModel")) try app.persistAcceptedModel(selected);
             // Keep the session or workspace discriminator while updating the
@@ -1655,6 +1649,7 @@ const FakeApp = struct {
     workspace_root: []u8,
     tool_registry: tool_dispatch.Registry = .{},
     selected_model: std.ArrayList(u8) = .empty,
+    selected_provider: model_provider.ProviderId = .gateway,
     auth: auth_runtime.Runtime = .{},
     permission_engine: permissions.PermissionEngine = .{},
     permission_state: app_permission_runtime.State = .{},
@@ -1675,6 +1670,7 @@ const FakeApp = struct {
     last_tone: ?types.NoticeTone = null,
     preference_commit_count: usize = 0,
     last_preference_model: std.ArrayList(u8) = .empty,
+    last_preference_provider: ?model_provider.ProviderId = null,
     last_preference_effort: ?types.ReasoningEffort = null,
     last_preference_fast_mode: ?bool = null,
     preference_settings_error: ?anyerror = null,
@@ -1822,6 +1818,7 @@ const FakeApp = struct {
         patch: app_session_runtime.SessionPreferencePatch,
     ) app_session_runtime.PreferenceCommitResult {
         self.preference_commit_count += 1;
+        self.last_preference_provider = patch.provider;
         self.last_preference_model.clearRetainingCapacity();
         if (patch.model) |model| {
             self.last_preference_model.appendSlice(self.alloc, model) catch
@@ -1832,11 +1829,7 @@ const FakeApp = struct {
         if (self.preference_settings_error == null) {
             const attempt = config_runtime.attemptUserPreferences(
                 self.alloc,
-                .{
-                    .model = patch.model,
-                    .effort = patch.effort,
-                    .fast_mode = patch.fast_mode,
-                },
+                patch.userSettingsPatch(),
             );
             return switch (attempt) {
                 .outcome => |outcome| .{
@@ -1948,14 +1941,8 @@ test "session_commands showStatus writes session status snapshot" {
 
     app.clearTranscript();
     app.permission_engine.mode = .yolo;
-    app.permission_state.sandbox_backend = .macos;
     try Commands(FakeApp).showStatus(&app);
     try expectTranscriptContains(&app, "permission_mode=yolo\n");
-    try expectTranscriptContains(&app, "sandbox=none\n");
-    try std.testing.expectEqual(
-        sandbox.BackendKind.macos,
-        app.permission_state.sandbox_backend,
-    );
 }
 
 test "session_commands history setting toggles durable input history" {
@@ -2123,15 +2110,15 @@ test "session_commands statusline shadow notice names the preference field" {
         &out.writer,
         .{
             .statusline_item = .{
-                .item = .sandbox,
+                .item = .context,
                 .enabled = false,
             },
         },
-        .{ .statusline_sandbox = .project },
+        .{ .statusline_context = .project },
     );
 
     try std.testing.expectEqualStrings(
-        "; fresh sessions here use higher-precedence statusLine.sandbox=project",
+        "; fresh sessions here use higher-precedence statusLine.context=project",
         out.written(),
     );
 }
@@ -2206,11 +2193,13 @@ test "session_commands handleModel resolves fuzzy cached model and syncs queued 
     var app = try FakeApp.init(alloc, "/tmp/workspace", "openai/gpt-4o");
     defer app.deinit();
     app.cached_ids = &ids;
+    app.selected_provider = .codex;
 
     try Commands(FakeApp).handleModel(&app, "claude sonnet");
 
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4-20250514", app.selected_model.items);
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4-20250514", app.worker.synced_model.?);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, app.last_preference_provider.?);
     try std.testing.expectEqualStrings(
         "workspace · anthropic/claude-sonnet-4-20250514",
         app.terminalTitleLabelText(),
@@ -2842,6 +2831,7 @@ test "session_commands model picker emits one combined preference transaction" {
         "anthropic/claude-opus-4.7",
     );
     defer app.deinit();
+    app.selected_provider = .codex;
     const efforts = [_]types.ReasoningEffort{types.ReasoningEffort.literal("high")};
     app.setGatewayControls("anthropic/claude-opus-4.7", &efforts, true);
 
@@ -2853,6 +2843,7 @@ test "session_commands model picker emits one combined preference transaction" {
     );
 
     try std.testing.expectEqual(@as(usize, 1), app.preference_commit_count);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, app.last_preference_provider.?);
     try std.testing.expectEqualStrings(
         "anthropic/claude-opus-4.7",
         app.last_preference_model.items,
