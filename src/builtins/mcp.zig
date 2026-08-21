@@ -10,6 +10,7 @@ const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const elicitation = @import("../core/mcp/elicitation.zig");
 const streamable_http = @import("../core/mcp/streamable_http.zig");
 const profile_paths = @import("../core/shared/profile_paths.zig");
+const profile_roots = @import("../core/shared/profile_roots.zig");
 const text_utils = @import("../core/shared/text_utils.zig");
 
 const Allocator = std.mem.Allocator;
@@ -129,6 +130,7 @@ fn handleCommand(alloc: Allocator, rest: []const u8, command_request: CommandReq
                 alloc,
                 name,
                 mismatch,
+                config_path,
             ),
         };
     }
@@ -333,6 +335,7 @@ fn issuerMismatchResult(
     alloc: Allocator,
     server_name: []const u8,
     mismatch: mcp_auth.IssuerMismatch,
+    config_path: []const u8,
 ) !CommandResult {
     var expected = try text_utils.encodeTerminalSafe(alloc, mismatch.expected, 1024);
     defer expected.deinit(alloc);
@@ -347,12 +350,14 @@ fn issuerMismatchResult(
     try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
     try out.writer.writeAll(". Add \"oauth\":{\"issuer\":");
     try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
-    try out.writer.writeAll("} to this server's entry in ~/.fx/mcp.json and retry.");
+    // The resolved path, not a literal: the profile root depends on the layout fx resolved.
+    try out.writer.print("}} to this server's entry in {s} and retry.", .{config_path});
     return .{ .display = .{ .line = try out.toOwnedSlice() } };
 }
 
 pub fn configPathFromHome(alloc: Allocator, home: []const u8) ![]u8 {
-    return profile_paths.mcpConfigPath(alloc, home);
+    const roots = try profile_roots.processRoots(home);
+    return profile_paths.mcpConfigPath(alloc, roots.config);
 }
 
 pub fn loadRuntime(
@@ -373,7 +378,11 @@ pub fn inspectProfileConfig(
     alloc: Allocator,
 ) error{OutOfMemory}!mcp_contract.ProfileConfigDiagnostic {
     const home = io_mod.getenv("HOME") orelse return .clear;
-    const config_path = try configPathFromHome(alloc, home);
+    const config_path = configPathFromHome(alloc, home) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // An unusable HOME reports no profile config, same as an absent one.
+        error.ProfileRootNotAbsolute => return .clear,
+    };
     defer alloc.free(config_path);
 
     var configs = loadConfigFromPath(alloc, config_path) catch |err| {
@@ -1763,11 +1772,16 @@ test "MCP auth requires explicit browser confirmation and logout stays non-secre
         command_request,
     );
     defer mismatch.deinit(alloc);
-    try expectLine(
-        mismatch,
-        "MCP authentication for 'mismatch' was rejected: expected issuer \"https://signin.auth.plain.com/\" but metadata returned \"https://signin.auth.plain.com\". Add \"oauth\":{\"issuer\":\"https://signin.auth.plain.com\"} to this server's entry in ~/.fx/mcp.json and retry.",
-        false,
+    // Resolved from the same home the command saw, so the message follows the active layout.
+    const mismatch_config_path = try configPathFromHome(alloc, command_request.home.?);
+    defer alloc.free(mismatch_config_path);
+    const expected_mismatch = try std.fmt.allocPrint(
+        alloc,
+        "MCP authentication for 'mismatch' was rejected: expected issuer \"https://signin.auth.plain.com/\" but metadata returned \"https://signin.auth.plain.com\". Add \"oauth\":{{\"issuer\":\"https://signin.auth.plain.com\"}} to this server's entry in {s} and retry.",
+        .{mismatch_config_path},
     );
+    defer alloc.free(expected_mismatch);
+    try expectLine(mismatch, expected_mismatch, false);
     try std.testing.expectEqual(@as(usize, 3), fixture.validation_calls);
     try std.testing.expectEqual(@as(usize, 2), fixture.auth_calls);
 

@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { FX_BIN, HAS_API_KEY, REPO_ROOT, runFx } from "../evals/eval-helpers";
+import { FX_BIN, fxProfileRoots, HAS_API_KEY, REPO_ROOT, runFx } from "../evals/eval-helpers";
 import {
   AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
   customProviderGuidanceState,
@@ -300,12 +300,22 @@ function persistedAcpPayloadText(payload: unknown): string {
   return Buffer.from(wire.data, "base64").toString("utf8");
 }
 
+/**
+ * Sessions directory of a fixture home, whichever layout fx resolved for it. A fixture that seeds
+ * `~/.fx` keeps every entry on the legacy root, while a fixture that seeds nothing splits across
+ * the XDG roots, so the probe reads the tree that exists instead of freezing one of the two.
+ */
+function acpSessionsDir(home: string): string {
+  const legacy = join(home, ".fx", "sessions");
+  return existsSync(legacy) ? legacy : join(fxProfileRoots(home).state, "sessions");
+}
+
 function findPersistedAcpDeliveryIds(
   root: ReturnType<typeof createIsolatedRoot>,
   childId: string,
   payload: string,
 ): string[] {
-  const path = join(root.home, ".fx", "sessions", childId, "subagent", "communication.json");
+  const path = join(acpSessionsDir(root.home), childId, "subagent", "communication.json");
   if (!existsSync(path)) return [];
   const record = JSON.parse(readFileSync(
     path,
@@ -364,7 +374,7 @@ function acpSubagentState(
   root: ReturnType<typeof createIsolatedRoot>,
   childId: string,
 ): string | null {
-  const path = join(root.home, ".fx", "sessions", childId, "subagent", "control.json");
+  const path = join(acpSessionsDir(root.home), childId, "subagent", "control.json");
   if (!existsSync(path)) return null;
   const record = JSON.parse(readFileSync(path, "utf8")) as { state?: string };
   return record.state ?? null;
@@ -459,7 +469,7 @@ function expectAcpHumanUnreadIndependent(
   eventId: string,
 ) {
   const record = JSON.parse(readFileSync(
-    join(root.home, ".fx", "sessions", childId, "subagent", "communication.json"),
+    join(acpSessionsDir(root.home), childId, "subagent", "communication.json"),
     "utf8",
   )) as {
     ledger: {
@@ -486,7 +496,7 @@ function expectAcpParentHistoryClean(
   parentSessionId: string,
   forbidden: string[],
 ) {
-  const sessionDir = join(root.home, ".fx", "sessions", parentSessionId);
+  const sessionDir = join(acpSessionsDir(root.home), parentSessionId);
   for (const name of ["session.json", "events.jsonl"]) {
     const path = join(sessionDir, name);
     if (!existsSync(path)) continue;
@@ -568,6 +578,9 @@ class AcpClient {
   }): Promise<AcpClient> {
     const args = opts?.args ?? ["acp"];
     const inheritedEnv: Record<string, string | undefined> = { ...process.env };
+    // Test homes share a uid, so an inherited runtime directory would make them share one
+    // terminal-host socket instead of isolating per home.
+    delete inheritedEnv.XDG_RUNTIME_DIR;
     if (opts?.omitHome) delete inheritedEnv.HOME;
     for (const [key, value] of Object.entries(opts?.env ?? {})) {
       if (value === undefined) {
@@ -2112,7 +2125,7 @@ describe("acp: model-independent", () => {
           `${MODERN_HTTP_TOOL_RESULT}:authenticated`,
         );
         const session = readFileSync(
-          join(root.home, ".fx", "sessions", sessionId, "session.json"),
+          join(acpSessionsDir(root.home), sessionId, "session.json"),
           "utf8",
         );
         expect(session).not.toContain(bearer);
@@ -6243,7 +6256,7 @@ describe("acp: model-independent", () => {
         );
         await client.close();
 
-        const sessionsDir = join(root.home, ".fx", "sessions");
+        const sessionsDir = acpSessionsDir(root.home);
         const control = readdirSync(sessionsDir)
           .map((id) => ({
             id,

@@ -1,6 +1,7 @@
 const std = @import("std");
 const io_mod = @import("../../core/shared/io.zig");
 const profile_paths = @import("../../core/shared/profile_paths.zig");
+const profile_roots = @import("../../core/shared/profile_roots.zig");
 const tool_args = @import("../../core/tooling/tool_args.zig");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
 
@@ -69,13 +70,26 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     const input = erased.as(Input);
     const output = runMemory(ctx.allocator, input.action, input.fact) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.MemoryClearFailed => return .{ .failure = try ctx.allocator.dupe(
-            u8,
-            "memory clear failed: saved memories were not removed; ensure ~/.fx/memories.json is a removable file and retry",
-        ) },
+        error.MemoryClearFailed => {
+            const path = resolvedMemoriesPath(ctx.allocator);
+            defer if (path) |owned| ctx.allocator.free(owned);
+            return .{ .failure = try std.fmt.allocPrint(
+                ctx.allocator,
+                "memory clear failed: saved memories were not removed; ensure {s} is a removable file and retry",
+                .{path orelse "the profile memories.json"},
+            ) };
+        },
         else => return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "memory failed: {s}", .{@errorName(err)}) },
     };
     return .{ .success = output };
+}
+
+/// Absolute `memories.json` under the resolved data root, or null when no profile resolves.
+/// A user-facing message must name the path the active layout uses, never a fixed literal.
+fn resolvedMemoriesPath(alloc: Allocator) ?[]u8 {
+    const home = io_mod.getenv("HOME") orelse return null;
+    const roots = profile_roots.processRoots(home) catch return null;
+    return profile_paths.memoriesPath(alloc, roots.data) catch null;
 }
 
 pub fn execute(arena: Allocator, args_json: []const u8) ![]u8 {
@@ -89,7 +103,8 @@ fn runMemory(alloc: Allocator, action: []const u8, fact: ?[]const u8) ![]u8 {
     if (!isSupportedAction(action)) return error.UnsupportedMemoryAction;
 
     const home = io_mod.getenv("HOME") orelse return std.fmt.allocPrint(alloc, "memory unavailable: HOME not set", .{});
-    const memories_path = try profile_paths.memoriesPath(alloc, home);
+    const roots = try profile_roots.processRoots(home);
+    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
     defer alloc.free(memories_path);
 
     if (std.mem.eql(u8, action, "save")) {
@@ -162,9 +177,10 @@ fn freeMemories(alloc: Allocator, list: *std.ArrayList([]u8)) void {
 
 fn saveMemories(alloc: Allocator, path: []const u8, memories: []const []u8) !void {
     const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
-    std.Io.Dir.createDirAbsolute(io_mod.getIo(), dir_path, .default_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
+    // The data root can sit several levels below HOME, so create the whole chain instead of a
+    // single directory: `~/.local/share` does not necessarily exist yet.
+    var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(dir_path, null);
+    root.close();
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -332,7 +348,8 @@ test "memory owner preserves active output behavior" {
     try expectMemoryOutput("{\"action\":\"save\",\"fact\":\"likes Zig\"}", "remembered");
     try expectMemoryOutput("{\"action\":\"list\"}", "- likes Zig\n");
 
-    const memories_path = try profile_paths.memoriesPath(alloc, home);
+    const roots = try profile_roots.processRoots(home);
+    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
     defer alloc.free(memories_path);
     var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), memories_path, .{});
     const content = blk: {
