@@ -6,9 +6,7 @@ const profile_roots = @import("../shared/profile_roots.zig");
 const types = @import("../shared/types.zig");
 const tool_result_limits = @import("../tooling/tool_result_limits.zig");
 const context_limits = @import("context_limits.zig");
-const input_appearance = @import("input_appearance.zig");
 const model_provider = @import("model_provider.zig");
-const presentation_mode = @import("presentation_mode.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const sort_utils = @import("../shared/sort_utils.zig");
 const update_target = @import("../upgrade/update_target.zig");
@@ -100,8 +98,6 @@ pub const UserSettingsPatch = struct {
     yolo_acknowledged: ?bool = null,
     effort: ?types.ReasoningEffort = null,
     fast_mode: ?bool = null,
-    input_appearance: ?[]const u8 = null,
-    maxxing_mode: ?[]const u8 = null,
     slash_menu_categories: ?bool = null,
     update_channel: ?update_target.Channel = null,
     startup_scrollback: ?bool = null,
@@ -122,8 +118,6 @@ pub const UserSettingsPatch = struct {
             self.yolo_acknowledged == null and
             self.effort == null and
             self.fast_mode == null and
-            self.input_appearance == null and
-            self.maxxing_mode == null and
             self.slash_menu_categories == null and
             self.update_channel == null and
             self.startup_scrollback == null and
@@ -209,8 +203,6 @@ const UserPreferenceField = enum(u4) {
     permission_mode,
     effort,
     fast_mode,
-    input_appearance,
-    maxxing_mode,
     slash_menu_categories,
     update_channel,
     startup_scrollback,
@@ -228,8 +220,6 @@ const UserPreferenceField = enum(u4) {
             .permission_mode => "settings.json.preference-migration.permission_mode.json",
             .effort => "settings.json.preference-migration.effort.json",
             .fast_mode => "settings.json.preference-migration.fast_mode.json",
-            .input_appearance => "settings.json.preference-migration.input_appearance.json",
-            .maxxing_mode => "settings.json.preference-migration.maxxing_mode.json",
             .slash_menu_categories => "settings.json.preference-migration.slash_menu_categories.json",
             .update_channel => "settings.json.preference-migration.update_channel.json",
             .startup_scrollback => "settings.json.preference-migration.startup_scrollback.json",
@@ -245,8 +235,6 @@ const user_preference_fields = [_]UserPreferenceField{
     .permission_mode,
     .effort,
     .fast_mode,
-    .input_appearance,
-    .maxxing_mode,
     .slash_menu_categories,
     .update_channel,
     .startup_scrollback,
@@ -861,22 +849,12 @@ pub fn validateModel(model: []const u8) !void {
 
 fn validateUserPatch(patch: UserSettingsPatch) !void {
     if (patch.model) |model| try validateModel(model);
-    if (patch.input_appearance) |appearance| try validateInputAppearance(appearance);
-    if (patch.maxxing_mode) |mode| try validateMaxxingMode(mode);
 }
 
 fn validAdditionalDirectoryPath(path: []const u8) bool {
     return path.len > 0 and path.len <= std.fs.max_path_bytes and
         std.fs.path.isAbsolute(path) and std.unicode.utf8ValidateSlice(path) and
         std.mem.findScalar(u8, path, 0) == null;
-}
-
-pub fn validateInputAppearance(appearance: []const u8) !void {
-    if (!input_appearance.InputAppearance.isPersistedLabel(appearance)) return error.InvalidDurableField;
-}
-
-pub fn validateMaxxingMode(mode: []const u8) !void {
-    if (!presentation_mode.MaxxingMode.isPersistedLabel(mode)) return error.InvalidDurableField;
 }
 
 test "clearing the credential choice removes the key rather than blanking it" {
@@ -923,24 +901,13 @@ test "provider patch keeps independent provider models" {
     try std.testing.expectEqual(model_provider.ProviderId.codex, model_provider.parse(root.object.get("provider").?.string).?);
 }
 
-test "input appearance validation keeps experiment labels private" {
-    try std.testing.expectError(error.InvalidDurableField, validateInputAppearance("minimal-maxxing"));
-    try std.testing.expectError(error.InvalidDurableField, validateInputAppearance("no-lines"));
-}
-
-test "maxxing mode validation accepts only public modes" {
-    try validateMaxxingMode("minimal");
-    try validateMaxxingMode("legacy");
-    try validateMaxxingMode("normal");
-    try std.testing.expectError(error.InvalidDurableField, validateMaxxingMode("bare"));
-}
-
 fn applyMutationToRoot(
     arena: Allocator,
     root: *std.json.Value,
     mutation: SettingsMutation,
 ) !PatchApplication {
-    return switch (mutation) {
+    const retired_settings_removed = removeRetiredPresentationSettings(&root.object);
+    var application = try switch (mutation) {
         .user => |patch| applyUserPatchToRoot(arena, root, patch),
         .workspace_directory => |workspace| applyWorkspaceDirectoryMutationToRoot(
             arena,
@@ -949,6 +916,8 @@ fn applyMutationToRoot(
         ),
         .permission => |permission| applyPermissionMutationToRoot(arena, root, permission),
     };
+    application.changed = application.changed or retired_settings_removed;
+    return application;
 }
 
 fn applyUserPatchToRoot(
@@ -970,8 +939,6 @@ fn applyUserPatchToRoot(
     if (patch.yolo_acknowledged) |value| application.changed = try putBool(arena, &root.object, "yolo_acknowledged", value) or application.changed;
     if (patch.effort) |value| application.changed = try putString(arena, &root.object, "effort", value.label()) or application.changed;
     if (patch.fast_mode) |value| application.changed = try putBool(arena, &root.object, "fast_mode", value) or application.changed;
-    if (patch.input_appearance) |value| application.changed = try putString(arena, &root.object, "input_appearance", value) or application.changed;
-    if (patch.maxxing_mode) |value| application.changed = try putString(arena, &root.object, "maxxing_mode", value) or application.changed;
     if (patch.slash_menu_categories) |value| application.changed = try putBool(arena, &root.object, "slash_menu_categories", value) or application.changed;
     if (patch.update_channel) |value| application.changed = try putString(arena, &root.object, "update_channel", value.label()) or application.changed;
     if (patch.startup_scrollback) |value| application.changed = try putBool(arena, &root.object, "startup_scrollback", value) or application.changed;
@@ -1023,6 +990,30 @@ fn applyUserPatchToRoot(
     return application;
 }
 
+fn removeRetiredPresentationSettings(root: *std.json.ObjectMap) bool {
+    var changed = false;
+    inline for (&.{ "input_appearance", "maxxing_mode" }) |key| {
+        if (root.contains(key)) {
+            _ = root.orderedRemove(key);
+            changed = true;
+        }
+    }
+
+    const workspaces = root.getPtr("workspaces") orelse return changed;
+    if (workspaces.* != .object) return changed;
+    var iterator = workspaces.object.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* != .object) continue;
+        inline for (&.{ "input_appearance", "maxxing_mode" }) |key| {
+            if (entry.value_ptr.object.contains(key)) {
+                _ = entry.value_ptr.object.orderedRemove(key);
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
 fn cleanupLegacyWorkspacePreferences(
     arena: Allocator,
     root: *std.json.Value,
@@ -1065,20 +1056,6 @@ fn cleanupLegacyWorkspacePreferences(
             "fast_mode",
             .fast_mode,
             patch.fast_mode != null,
-            application,
-        );
-        removeLegacyLeaf(
-            &entry.value_ptr.object,
-            "input_appearance",
-            .input_appearance,
-            patch.input_appearance != null,
-            application,
-        );
-        removeLegacyLeaf(
-            &entry.value_ptr.object,
-            "maxxing_mode",
-            .maxxing_mode,
-            patch.maxxing_mode != null,
             application,
         );
         removeLegacyLeaf(
@@ -1674,14 +1651,6 @@ fn validateKnownSettingsObject(
             if (value != .bool) return error.InvalidSettingsFormat;
         }
     }
-    if (object.get("input_appearance")) |value| {
-        if (value != .string) return error.InvalidSettingsFormat;
-        validateInputAppearance(value.string) catch return error.InvalidSettingsFormat;
-    }
-    if (object.get("maxxing_mode")) |value| {
-        if (value != .string) return error.InvalidSettingsFormat;
-        validateMaxxingMode(value.string) catch return error.InvalidSettingsFormat;
-    }
     if (object.get("update_channel")) |value| {
         if (value != .string or update_target.Channel.parse(value.string) == null) {
             return error.InvalidSettingsFormat;
@@ -1891,8 +1860,6 @@ test "user patch writes user preferences at top level" {
         .yolo_acknowledged = true,
         .effort = types.ReasoningEffort.literal("high"),
         .fast_mode = true,
-        .input_appearance = "tint",
-        .maxxing_mode = "minimal",
         .slash_menu_categories = false,
         .update_channel = .dev,
         .startup_scrollback = false,
@@ -1914,8 +1881,6 @@ test "user patch writes user preferences at top level" {
     try std.testing.expect(std.mem.find(u8, bytes, "\"yolo_acknowledged\":true") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"effort\":\"high\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"fast_mode\":true") != null);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"input_appearance\":\"tint\"") != null);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"maxxing_mode\":\"minimal\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"slash_menu_categories\":false") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"update_channel\":\"dev\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"startup_scrollback\":false") != null);
@@ -1924,6 +1889,34 @@ test "user patch writes user preferences at top level" {
     try std.testing.expect(std.mem.find(u8, bytes, "\"notifications\":{\"turn_end\":true,\"attention_required\":false}") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"future\":{\"nested\":7}") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"workspaces\"") == null);
+}
+
+test "user patch retires presentation settings without rejecting their values" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try writeStoreFixture(
+        tmp.dir,
+        "home/.fx/settings.json",
+        "{\"input_appearance\":false,\"maxxing_mode\":7,\"future\":{\"profile\":1},\"workspaces\":{\"/workspace\":{\"input_appearance\":[],\"maxxing_mode\":{},\"future\":{\"workspace\":2}}}}\n",
+    );
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    var store = try Store.initFromHome(alloc, home, .writable);
+    defer store.deinit(alloc);
+
+    var outcome = try store.applyUserPatch(alloc, .{ .model = "openai/gpt-5.4" });
+    defer outcome.deinit(alloc);
+    try std.testing.expect(outcome == .committed);
+
+    const bytes = try store.readPrimaryForTest(alloc);
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.find(u8, bytes, "input_appearance") == null);
+    try std.testing.expect(std.mem.find(u8, bytes, "maxxing_mode") == null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"future\":{\"profile\":1}") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"future\":{\"workspace\":2}") != null);
 }
 
 test "workspace statusline patch writes globally and preserves nested leaf" {
@@ -2051,20 +2044,19 @@ test "user patch snapshots and removes legacy workspace copies" {
     var outcome = try store.applyUserPatch(alloc, .{
         .model = "openai/gpt-5.4",
         .permission_mode = .auto,
-        .input_appearance = "tint",
     });
     defer outcome.deinit(alloc);
 
     try std.testing.expect(outcome == .committed);
-    try std.testing.expectEqual(@as(usize, 6), outcome.committed.cleanup.fields_removed);
+    try std.testing.expectEqual(@as(usize, 4), outcome.committed.cleanup.fields_removed);
     try std.testing.expectEqual(@as(usize, 2), outcome.committed.cleanup.workspaces_changed);
-    try std.testing.expectEqual(@as(usize, 3), outcome.committed.cleanup.recovery_paths.len);
+    try std.testing.expectEqual(@as(usize, 2), outcome.committed.cleanup.recovery_paths.len);
 
     const bytes = try store.readPrimaryForTest(alloc);
     defer alloc.free(bytes);
     try std.testing.expect(std.mem.find(u8, bytes, "\"model\":\"openai/gpt-5.4\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"permission_mode\":\"auto\"") != null);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"input_appearance\":\"tint\"") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "input_appearance") == null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"model\":\"workspace/a\"") == null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"model\":\"workspace/b\"") == null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"permission_mode\":\"ask\"") == null);
@@ -2663,7 +2655,6 @@ test "multi-value user patch commits model effort and fast mode once" {
         .model = "openai/gpt-5.4",
         .effort = types.ReasoningEffort.literal("high"),
         .fast_mode = false,
-        .input_appearance = "lines",
     });
     defer outcome.deinit(alloc);
     try std.testing.expect(outcome == .committed);

@@ -49,8 +49,6 @@ pub const Settings = struct {
     first_call_tool_choice: ?types.ToolChoice = null,
     context: ?bool = null,
     fast_mode: ?bool = null,
-    input_appearance: ?[]u8 = null,
-    maxxing_mode: ?[]u8 = null,
     slash_menu_categories: ?bool = null,
     auto_upgrade: ?bool = null,
     update_channel: ?update_target.Channel = null,
@@ -70,8 +68,6 @@ pub const Settings = struct {
         if (self.model) |value| alloc.free(value);
         if (self.codex_model) |value| alloc.free(value);
         if (self.grok_model) |value| alloc.free(value);
-        if (self.input_appearance) |value| alloc.free(value);
-        if (self.maxxing_mode) |value| alloc.free(value);
         self.permission_rules.deinit(alloc);
         self.* = .{};
     }
@@ -111,8 +107,6 @@ pub const ConfigSources = struct {
     permission_mode: ConfigSource = .compiled_default,
     effort: ConfigSource = .compiled_default,
     fast_mode: ConfigSource = .compiled_default,
-    input_appearance: ConfigSource = .compiled_default,
-    maxxing_mode: ConfigSource = .compiled_default,
     slash_menu_categories: ConfigSource = .compiled_default,
     startup_scrollback: ConfigSource = .compiled_default,
     prompt_history_enabled: ConfigSource = .compiled_default,
@@ -517,8 +511,6 @@ fn hasLegacyWorkspacePreferences(root: std.json.Value) bool {
             "model",
             "effort",
             "fast_mode",
-            "input_appearance",
-            "maxxing_mode",
             "slash_menu_categories",
             "startup_scrollback",
         }) |key| {
@@ -547,8 +539,6 @@ fn isProfileOnlySettingKey(key: []const u8) bool {
         "grok_model",
         "effort",
         "fast_mode",
-        "input_appearance",
-        "maxxing_mode",
         "slash_menu_categories",
         "startup_scrollback",
         "prompt_history",
@@ -595,8 +585,6 @@ fn updateConfigSources(sources: *ConfigSources, settings: Settings, source: Conf
     if (settings.permission_mode != null) sources.permission_mode = source;
     if (settings.effort != null) sources.effort = source;
     if (settings.fast_mode != null) sources.fast_mode = source;
-    if (settings.input_appearance != null) sources.input_appearance = source;
-    if (settings.maxxing_mode != null) sources.maxxing_mode = source;
     if (settings.slash_menu_categories != null) sources.slash_menu_categories = source;
     if (settings.startup_scrollback != null) sources.startup_scrollback = source;
     if (settings.prompt_history_enabled != null) sources.prompt_history_enabled = source;
@@ -1329,20 +1317,6 @@ fn parseProfileOnlyFields(
         settings.fast_mode = value.bool;
     }
 
-    if (root.object.get("input_appearance")) |input_appearance_value| {
-        const value = input_appearance_value;
-        if (value != .string) return error.InvalidInputAppearanceType;
-        settings_store.validateInputAppearance(value.string) catch return error.InvalidInputAppearanceValue;
-        settings.input_appearance = try alloc.dupe(u8, value.string);
-    }
-
-    if (root.object.get("maxxing_mode")) |maxxing_mode_value| {
-        const value = maxxing_mode_value;
-        if (value != .string) return error.InvalidMaxxingModeType;
-        settings_store.validateMaxxingMode(value.string) catch return error.InvalidMaxxingModeValue;
-        settings.maxxing_mode = try alloc.dupe(u8, value.string);
-    }
-
     if (root.object.get("slash_menu_categories")) |slash_menu_categories_value| {
         const value = slash_menu_categories_value;
         if (value != .bool) return error.InvalidSlashMenuCategoriesType;
@@ -1479,16 +1453,6 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
     if (incoming.first_call_tool_choice) |value| target.first_call_tool_choice = value;
     if (incoming.context) |value| target.context = value;
     if (incoming.fast_mode) |value| target.fast_mode = value;
-    if (incoming.input_appearance) |value| {
-        if (target.input_appearance) |current| alloc.free(current);
-        target.input_appearance = value;
-        incoming.input_appearance = null;
-    }
-    if (incoming.maxxing_mode) |value| {
-        if (target.maxxing_mode) |current| alloc.free(current);
-        target.maxxing_mode = value;
-        incoming.maxxing_mode = null;
-    }
     if (incoming.slash_menu_categories) |value| target.slash_menu_categories = value;
     if (incoming.auto_upgrade) |value| target.auto_upgrade = value;
     if (incoming.update_channel) |value| target.update_channel = value;
@@ -2073,6 +2037,15 @@ test "skill_match_fuzzy returns a migration-specific parse error" {
         error.RetiredSkillMatchFuzzy,
         parseSettingsJson(std.testing.allocator, "{\"skill_match_fuzzy\":true}"),
     );
+}
+
+test "retired presentation settings are ignored regardless of type" {
+    var settings = try parseSettingsJson(
+        std.testing.allocator,
+        "{\"model\":\"openai/gpt-5.4\",\"input_appearance\":false,\"maxxing_mode\":7}",
+    );
+    defer settings.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("openai/gpt-5.4", settings.model.?);
 }
 
 test "startup_scrollback parses merges rejects invalid type and round trips" {
@@ -2921,15 +2894,13 @@ test "project profile-only settings are ignored and diagnosed by key" {
     try std.testing.expectEqual(false, result.settings.auto_upgrade.?);
     try std.testing.expectEqual(update_target.Channel.dev, result.settings.update_channel.?);
     try std.testing.expectEqual(false, result.settings.fast_mode.?);
-    try std.testing.expectEqualStrings("tint", result.settings.input_appearance.?);
-    try std.testing.expectEqualStrings("minimal", result.settings.maxxing_mode.?);
     try std.testing.expectEqual(false, result.settings.slash_menu_categories.?);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), result.settings.effort.?);
     try std.testing.expectEqual(false, result.settings.startup_scrollback.?);
     try std.testing.expectEqual(@as(usize, 1), result.settings.permission_rules.rules.len);
     try expectPermissionRule(result.settings.permission_rules.rules[0], "bash", "profile *", .allow);
 
-    try std.testing.expectEqual(@as(usize, 15), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 13), result.diagnostics.len);
     inline for (&.{
         "model",
         "permission_mode",
@@ -2941,8 +2912,6 @@ test "project profile-only settings are ignored and diagnosed by key" {
         "auto_upgrade",
         "update_channel",
         "fast_mode",
-        "input_appearance",
-        "maxxing_mode",
         "slash_menu_categories",
         "effort",
         "startup_scrollback",
@@ -3299,14 +3268,12 @@ test "detailed settings expose target sources and permission views" {
     try std.testing.expectEqual(ConfigSource.user_workspace, result.sources.permission_mode);
     try std.testing.expectEqual(ConfigSource.compiled_default, result.sources.effort);
     try std.testing.expectEqual(ConfigSource.user_global, result.sources.fast_mode);
-    try std.testing.expectEqual(ConfigSource.user_workspace, result.sources.input_appearance);
     try std.testing.expectEqual(ConfigSource.user_global, result.sources.startup_scrollback);
     try std.testing.expectEqual(ConfigSource.user_global, result.sources.prompt_history_enabled);
     try std.testing.expectEqual(ConfigSource.user_global, result.sources.statusline_context);
     try std.testing.expectEqual(ConfigSource.user_global, result.sources.statusline_session);
     try std.testing.expectEqual(true, result.settings.statusline_session.?);
     try std.testing.expectEqual(@as(usize, 33), result.settings.max_agent_steps.?);
-    try std.testing.expectEqualStrings("lines", result.settings.input_appearance.?);
 
     try std.testing.expectEqual(@as(usize, 1), result.permission_sources.user.rules.len);
     try expectPermissionRule(result.permission_sources.user.rules[0], "bash", "user *", .allow);

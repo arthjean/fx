@@ -1364,7 +1364,6 @@ const FakeShell = struct {
     shimmer_active: bool = false,
     render_requests: render_request.RenderRequestState = .{},
     lifecycle: transcript_runtime.TranscriptRuntime = .{
-        .maxxing_mode = .legacy,
         .layout = .{
             .rows = 24,
             .cols = 80,
@@ -2603,17 +2602,7 @@ test "core.app_worker_runtime queued command completion preserves three thousand
 
     block = &app.shell.lifecycle.command_output_blocks.items[0];
     try std.testing.expectEqual(@as(usize, 3_000), block.total_lines);
-    var compact = try app.shell.lifecycle.prepareTranscriptSource(alloc, null);
-    defer compact.deinit(alloc);
-    try std.testing.expectEqual(
-        @as(usize, 5),
-        std.mem.count(u8, compact.bytes, "\n"),
-    );
-    try std.testing.expect(std.mem.find(
-        u8,
-        compact.bytes,
-        "│ … 2995 lines more (ctrl o to view)",
-    ) != null);
+    try std.testing.expectEqualStrings("unterminated", block.lines.items[2_999].text);
 }
 
 test "core.app_worker_runtime syncState mirrors approvals without opening a pending question" {

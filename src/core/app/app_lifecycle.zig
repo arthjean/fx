@@ -6,7 +6,6 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const host = @import("../hosts/host.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
-const input_appearance = @import("../config/input_appearance.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const model_provider = @import("../config/model_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -18,7 +17,6 @@ const notification_sound = @import("../notifications/sound.zig");
 const tool_result_limits = @import("../tooling/tool_result_limits.zig");
 const types = @import("../shared/types.zig");
 const ui_render = @import("../../ui/render.zig");
-const presentation_mode = @import("../config/presentation_mode.zig");
 const transcript_presentation = @import("../output/transcript_presentation.zig");
 const shell_runtime = @import("../../ui/shell_runtime.zig");
 const ui_terminal = @import("../../ui/terminal/terminal.zig");
@@ -134,8 +132,6 @@ pub const StartupState = struct {
     context_limits: config_runtime.context_limits.Values = .{},
     context_enabled: bool = true,
     fast_mode: bool = false,
-    input_appearance: input_appearance.InputAppearance = .default,
-    maxxing_mode: presentation_mode.MaxxingMode = presentation_mode.MaxxingMode.default,
     slash_menu_categories: bool = true,
     auto_upgrade: bool = true,
     update_channel: update_target.Channel = .stable,
@@ -427,8 +423,6 @@ fn loadStartupStateFromOwnedWorkspace(
     state.context_limits = config_runtime.resolveContextLimits(settings, &.{});
     state.context_enabled = settings.context orelse true;
     state.fast_mode = settings.fast_mode orelse false;
-    state.input_appearance = initialInputAppearance(settings.input_appearance);
-    state.maxxing_mode = initialMaxxingMode(settings.maxxing_mode);
     state.slash_menu_categories = settings.slash_menu_categories orelse true;
     state.auto_upgrade = settings.auto_upgrade orelse true;
     state.update_channel = settings.update_channel orelse .stable;
@@ -1163,24 +1157,6 @@ test "startup provider chooses only its provider-scoped model" {
 
 fn loadInitialModel(alloc: Allocator, default_model: []const u8, configured: ?[]const u8) ![]u8 {
     return alloc.dupe(u8, initialModelId(default_model, configured));
-}
-
-fn initialInputAppearance(configured: ?[]const u8) input_appearance.InputAppearance {
-    return input_appearance.InputAppearance.parse(
-        configured orelse input_appearance.InputAppearance.default.label(),
-    ) orelse .default;
-}
-
-fn initialMaxxingMode(configured: ?[]const u8) presentation_mode.MaxxingMode {
-    const value = configured orelse return presentation_mode.MaxxingMode.default;
-    return presentation_mode.MaxxingMode.parse(value) orelse presentation_mode.MaxxingMode.default;
-}
-
-test "maxxing mode defaults to minimal and accepts legacy settings" {
-    try std.testing.expectEqual(presentation_mode.MaxxingMode.default, initialMaxxingMode(null));
-    try std.testing.expectEqual(presentation_mode.MaxxingMode.minimal, initialMaxxingMode("minimal"));
-    try std.testing.expectEqual(presentation_mode.MaxxingMode.legacy, initialMaxxingMode("legacy"));
-    try std.testing.expectEqual(presentation_mode.MaxxingMode.legacy, initialMaxxingMode("normal"));
 }
 
 fn hasProcessModelOverride() bool {
@@ -2120,46 +2096,10 @@ test "loadStartupState resolves startup scrollback default and explicit false" {
     var absent = try loadStartupStateForWorkspace(std.testing.allocator, absent_root, "default-model", 25);
     defer absent.deinit(std.testing.allocator);
     try std.testing.expect(absent.startup_scrollback);
-    try std.testing.expectEqual(input_appearance.InputAppearance.tint, absent.input_appearance);
 
     var disabled = try loadStartupStateForWorkspace(std.testing.allocator, disabled_root, "default-model", 25);
     defer disabled.deinit(std.testing.allocator);
     try std.testing.expect(!disabled.startup_scrollback);
-}
-
-test "loadStartupState resolves input appearance default and explicit lines" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
-    try tmp.dir.createDirPath(io_mod.getIo(), "absent");
-    try tmp.dir.createDirPath(io_mod.getIo(), "lines");
-
-    const home_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "home");
-    defer std.testing.allocator.free(home_root);
-    const absent_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "absent");
-    defer std.testing.allocator.free(absent_root);
-    const lines_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "lines");
-    defer std.testing.allocator.free(lines_root);
-
-    const fixture = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\"workspaces\":{{\"{s}\":{{\"input_appearance\":\"lines\"}}}}}}\n",
-        .{lines_root},
-    );
-    defer std.testing.allocator.free(fixture);
-    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", fixture);
-
-    var env = try TestEnv.install(std.testing.allocator, &.{.{ .key = "HOME", .value = home_root }});
-    defer env.deinit();
-
-    var absent = try loadStartupStateForWorkspace(std.testing.allocator, absent_root, "default-model", 25);
-    defer absent.deinit(std.testing.allocator);
-    try std.testing.expectEqual(input_appearance.InputAppearance.tint, absent.input_appearance);
-
-    var lines = try loadStartupStateForWorkspace(std.testing.allocator, lines_root, "default-model", 25);
-    defer lines.deinit(std.testing.allocator);
-    try std.testing.expectEqual(input_appearance.InputAppearance.lines, lines.input_appearance);
 }
 
 test "loadStartupState resolves slash menu categories default and explicit false" {

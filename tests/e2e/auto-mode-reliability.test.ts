@@ -58,7 +58,7 @@ function createIsolatedRoot(baseDir = tmpdir()): IsolatedRoot {
   mkdirSync(workspace, { recursive: true });
   writeFileSync(
     join(home, ".fx", "settings.json"),
-    JSON.stringify({ sandbox: "none", permission: {}, maxxing_mode: "legacy" }),
+    JSON.stringify({ sandbox: "none", permission: {} }),
   );
   roots.push(root);
   return { root, home, workspace: realpathSync(workspace) };
@@ -168,7 +168,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { pwd: "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const gateway = startGateway(
@@ -213,7 +212,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { "*": { "printf *": "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const gateway = startGateway(
@@ -800,7 +798,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { pwd: "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const rejectedMarker = join(root.workspace, "rejected-action-must-not-run");
@@ -978,7 +975,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { pwd: "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const markers = Array.from(
@@ -1047,7 +1043,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { pwd: "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const rejectedMarker = join(root.workspace, "tui-rejected-action-must-not-run");
@@ -1107,7 +1102,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { [allowedCommand]: "ask" } },
-          maxxing_mode: "legacy",
         }),
       );
       const gateway = startGateway([
@@ -1323,7 +1317,6 @@ describe("lean auto mode reliability", () => {
         JSON.stringify({
           sandbox: "none",
           permission: { bash: { [blockedCommand]: "allow", pwd: "allow" } },
-          maxxing_mode: "legacy",
         }),
       );
       const gateway = startGateway([

@@ -173,14 +173,6 @@ const QueuedCardProjection = struct {
     }
 };
 
-fn composerInputAppearance(comptime App: type, app: *App) render_input.InputAppearance {
-    return if (app.shell.maxxing_mode == .minimal) .lines else app.input_runtime.input_appearance;
-}
-
-fn composerPrefixStyle(comptime App: type, app: *App) input_presentation.ComposerPrefixStyle {
-    return if (app.shell.maxxing_mode == .minimal) .rail else .arrow;
-}
-
 // Queued prompts stay collapsed behind their summary row until the review is
 // opened; only then does the banner expand into one card per queued prompt.
 fn buildQueuedCardProjection(comptime App: type, app: *App) !QueuedCardProjection {
@@ -260,8 +252,6 @@ fn buildQueuedCardProjection(comptime App: type, app: *App) !QueuedCardProjectio
                 .image_tokens = review_entries[built].image_tokens.items,
                 .skill_tokens = skill_tokens,
             },
-            composerInputAppearance(App, app),
-            composerPrefixStyle(App, app),
         );
         const row_count: u16 = @intCast(@min(
             std.mem.count(u8, bytes, "\n"),
@@ -496,8 +486,6 @@ pub fn Runtime(comptime App: type) type {
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
-                .input_appearance = app.input_runtime.input_appearance,
-                .maxxing_mode = app.shell.maxxing_mode,
                 .permission_mode = if (comptime @hasField(App, "permission_engine"))
                     app.permission_engine.mode
                 else
@@ -579,10 +567,6 @@ pub fn Runtime(comptime App: type) type {
                     .now_ms = now_ms,
                     .selection_failure = app.session_persistence.session_picker.selection_failure,
                 } else .{},
-                .appearance_menu = render_input.appearanceMenuProjection(
-                    &app.input_runtime.appearance_menu,
-                    settings_snapshot,
-                ),
                 .statusline_menu = render_input.statuslineMenuProjection(
                     &app.input_runtime.statusline_menu,
                     settings_snapshot,
@@ -1087,8 +1071,6 @@ pub fn Runtime(comptime App: type) type {
             ctx.model = visible_model;
             ctx.pending_images = &.{};
             ctx.composer_visible = chat.messageable();
-            ctx.input_appearance = app.input_runtime.input_appearance;
-            ctx.maxxing_mode = app.shell.maxxing_mode;
             ctx.permission_mode = .auto;
             ctx.queued_count = 0;
             ctx.queued_paused = false;
@@ -1117,7 +1099,6 @@ pub fn Runtime(comptime App: type) type {
             else
                 .{};
             ctx.session_menu = .{};
-            ctx.appearance_menu = .{};
             ctx.statusline_menu = .{};
             ctx.usage_menu = .{};
             ctx.workspace_menu = .{};
@@ -1761,20 +1742,12 @@ pub fn Runtime(comptime App: type) type {
                     )) |source| {
                         transcript_source = source;
                     } else if (omitted_entry_id) |entry_id| {
-                        owned_transcript_source = if (presentation_shell.maxxing_mode == .minimal)
-                            try presentation_shell.prepareTranscriptSourceForFrameInterruptible(
-                                app.alloc,
-                                entry_id,
-                                null,
-                                checkpoint,
-                            )
-                        else
-                            try presentation_shell.prepareTranscriptSourceForFrameInterruptible(
-                                app.alloc,
-                                null,
-                                entry_id,
-                                checkpoint,
-                            );
+                        owned_transcript_source = try presentation_shell.prepareTranscriptSourceForFrameInterruptible(
+                            app.alloc,
+                            entry_id,
+                            null,
+                            checkpoint,
+                        );
                     } else {
                         owned_transcript_source = try presentation_shell.cachedTranscriptSourceInterruptible(
                             app.alloc,
@@ -2251,12 +2224,28 @@ pub fn Runtime(comptime App: type) type {
                 }
             }
 
+            var transcript_source: ?transcript_runtime.TranscriptPreparationSource = null;
+            defer if (transcript_source) |*source| source.deinit(app.alloc);
+            const transcript_document: approval_screen.TranscriptDocument = switch (approval_screen.transcriptDocumentPlan(
+                approval,
+                &app.approval_screen,
+                app.shell.entries.items,
+                app.shell.layout,
+            ) catch |err| return failApprovalScreen(app, request.id, err)) {
+                .none => .none,
+                .progressive => |present| .{ .progressive = present },
+                .projected => blk: {
+                    transcript_source = app.shell.cachedTranscriptSource(app.alloc) catch |err|
+                        return failApprovalScreen(app, request.id, err);
+                    break :blk .{ .projected = transcript_source.?.bytes };
+                },
+            };
+
             var screen = approval_screen.paint(
                 app.alloc,
                 approval,
                 &app.approval_screen,
-                app.shell.entries.items,
-                app.shell.retainedTranscriptStyles(),
+                transcript_document,
                 app.shell.layout,
                 clear_display,
             ) catch |err| return failApprovalScreen(app, request.id, err);
@@ -2326,8 +2315,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = clear_display,
@@ -2364,8 +2351,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = clear_display,
@@ -2402,8 +2387,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = true,
@@ -2440,8 +2423,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = true,
@@ -2482,8 +2463,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = clear_display,
@@ -2524,8 +2503,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = clear_display,
@@ -2572,8 +2549,6 @@ pub fn Runtime(comptime App: type) type {
                     .pasted_blocks = ctx.input.entities.pasted_blocks.items,
                     .image_tokens = ctx.input.entities.image_tokens.items,
                     .skill_tokens = ctx.input.entities.skill_tokens.items,
-                    .appearance = if (ctx.maxxing_mode == .minimal) .lines else ctx.input_appearance,
-                    .prefix_style = if (ctx.maxxing_mode == .minimal) .rail else .arrow,
                 },
                 .ctrl_c_pending = ctx.ctrl_c_pending,
                 .clear_display = clear_display,
@@ -3785,7 +3760,7 @@ test "core.app_render_runtime gives all transient activity the turn-summary foot
 }
 
 test "core.app_render_runtime connects minimal focused tools to the transcript block" {
-    var shell = transcript_runtime.TranscriptRuntime{ .maxxing_mode = .minimal };
+    var shell = transcript_runtime.TranscriptRuntime{};
     defer shell.deinit(std.testing.allocator);
 
     const active_tool = surface_frame.SurfaceFooterMeasurement{
