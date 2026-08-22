@@ -582,9 +582,8 @@ fn appendMcpConfigCheck(
 
 /// Absolute `mcp.json` under the resolved config root, or null when HOME is unavailable.
 fn resolvedMcpConfigPath(alloc: Allocator, paths: config_runtime.Paths) !?[]u8 {
-    const home = paths.home_dir orelse return null;
-    const roots = try profile_roots.processRoots(home);
-    return try profile_paths.mcpConfigPath(alloc, roots.config);
+    const config_root = paths.config_fx_dir orelse return null;
+    return try profile_paths.mcpConfigPath(alloc, config_root);
 }
 
 /// Reports the roots every profile path is built from, and which layout produced them.
@@ -593,15 +592,17 @@ fn appendProfileCheck(
     alloc: Allocator,
     paths: config_runtime.Paths,
 ) !void {
-    const home = paths.home_dir orelse {
+    if (paths.home_dir == null) {
         try appendCheck(checks, alloc, "profile", .warn, "HOME is not set; no profile root can be resolved");
         return;
-    };
-    const roots = try profile_roots.processRoots(home);
+    }
+    const config_root = paths.config_fx_dir.?;
+    const state_root = paths.state_fx_dir.?;
+    const data_root = paths.data_fx_dir.?;
     const detail = try std.fmt.allocPrint(
         alloc,
         "{s} layout; config={s} state={s} data={s}",
-        .{ @tagName(roots.layout), roots.config, roots.state, roots.data },
+        .{ @tagName(paths.profile_layout.?), config_root, state_root, data_root },
     );
     try appendCheckOwned(checks, alloc, "profile", .ok, detail);
 }
@@ -981,7 +982,8 @@ test "profile check reports the resolved roots and the active layout" {
     try std.testing.expectEqual(CheckStatus.ok, checks.items[0].status);
 
     // The detail must be the resolver's answer, never a path doctor spells out on its own.
-    const roots = try profile_roots.processRoots(home_root);
+    var roots = try profile_roots.resolveForProcess(alloc, home_root, .{});
+    defer roots.deinit(alloc);
     const expected = try std.fmt.allocPrint(alloc, "{s} layout; config={s} state={s} data={s}", .{
         @tagName(roots.layout),
         roots.config,

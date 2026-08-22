@@ -20,7 +20,10 @@ pub const Paths = struct {
     home_dir: ?[]u8 = null,
     user_settings: ?[]u8 = null,
     workspace_settings: []u8,
-    home_fx_dir: ?[]u8 = null,
+    config_fx_dir: ?[]u8 = null,
+    state_fx_dir: ?[]u8 = null,
+    data_fx_dir: ?[]u8 = null,
+    profile_layout: ?profile_roots.Layout = null,
     sessions_dir: ?[]u8 = null,
     workspace_root: []u8,
 
@@ -28,7 +31,9 @@ pub const Paths = struct {
         if (self.home_dir) |path| alloc.free(path);
         if (self.user_settings) |path| alloc.free(path);
         alloc.free(self.workspace_settings);
-        if (self.home_fx_dir) |path| alloc.free(path);
+        if (self.config_fx_dir) |path| alloc.free(path);
+        if (self.state_fx_dir) |path| alloc.free(path);
+        if (self.data_fx_dir) |path| alloc.free(path);
         if (self.sessions_dir) |path| alloc.free(path);
         alloc.free(self.workspace_root);
         self.* = undefined;
@@ -695,12 +700,14 @@ pub fn loadStartupStatusSettingsFromHome(alloc: Allocator, home_dir: []const u8,
 }
 
 pub fn ensureStateLayout(paths: Paths) !void {
-    if (paths.home_fx_dir) |dir| {
+    if (paths.config_fx_dir) |dir| {
         var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(dir, null);
         root.close();
     }
-    if (paths.sessions_dir) |dir| {
-        var sessions = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(dir, null);
+    if (paths.state_fx_dir) |dir| {
+        var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(dir, null);
+        defer root.close();
+        var sessions = try io_mod.openOrCreateVerifiedPrivateDir(&root, profile_paths.sessions_dir_name);
         sessions.close();
     }
 }
@@ -731,8 +738,9 @@ pub fn makeAbsolutePath(path_abs: []const u8) !void {
 
 pub fn userSettingsPath(alloc: Allocator) !?[]u8 {
     const home = io_mod.getenv("HOME") orelse return null;
-    const roots = try profile_roots.processRoots(home);
-    return try profile_paths.settingsPath(alloc, roots.config);
+    const config_root = try profile_roots.resolveRootForProcess(alloc, home, .config, .{});
+    defer alloc.free(config_root);
+    return try profile_paths.settingsPath(alloc, config_root);
 }
 
 pub const AllowlistResetScope = settings_store.AllowlistResetScope;
@@ -878,10 +886,18 @@ fn discoverPathsWithOptionalHome(alloc: Allocator, home_dir: ?[]const u8, worksp
         paths.home_dir = try alloc.dupe(u8, home);
         errdefer alloc.free(paths.home_dir.?);
 
-        const roots = try profile_roots.processRoots(home);
+        var roots = try profile_roots.resolveForProcess(alloc, home, .{});
+        defer roots.deinit(alloc);
 
-        paths.home_fx_dir = try alloc.dupe(u8, roots.config);
-        errdefer alloc.free(paths.home_fx_dir.?);
+        paths.config_fx_dir = try alloc.dupe(u8, roots.config);
+        errdefer alloc.free(paths.config_fx_dir.?);
+
+        paths.state_fx_dir = try alloc.dupe(u8, roots.state);
+        errdefer alloc.free(paths.state_fx_dir.?);
+
+        paths.data_fx_dir = try alloc.dupe(u8, roots.data);
+        errdefer alloc.free(paths.data_fx_dir.?);
+        paths.profile_layout = roots.layout;
 
         paths.user_settings = try profile_paths.settingsPath(alloc, roots.config);
         errdefer alloc.free(paths.user_settings.?);
@@ -1668,8 +1684,9 @@ fn expectIgnoredProjectKey(diagnostics: []const ConfigDiagnostic, key: []const u
 }
 
 fn readSettingsBytesForTest(alloc: Allocator, home: []const u8) ![]u8 {
-    const roots = try profile_roots.processRoots(home);
-    const path = try profile_paths.settingsPath(alloc, roots.config);
+    const config_root = try profile_roots.resolveRootForProcess(alloc, home, .config, .{});
+    defer alloc.free(config_root);
+    const path = try profile_paths.settingsPath(alloc, config_root);
     defer alloc.free(path);
 
     var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{});
@@ -1706,8 +1723,17 @@ test "discoverPathsFromHome returns home-backed and workspace paths" {
     try std.testing.expectEqualStrings("/tmp/workspace/.fx.json", paths.workspace_settings);
     try std.testing.expectEqualStrings(
         "/Users/tester/" ++ profile_roots.test_relative_roots.config,
-        paths.home_fx_dir.?,
+        paths.config_fx_dir.?,
     );
+    try std.testing.expectEqualStrings(
+        "/Users/tester/" ++ profile_roots.test_relative_roots.state,
+        paths.state_fx_dir.?,
+    );
+    try std.testing.expectEqualStrings(
+        "/Users/tester/" ++ profile_roots.test_relative_roots.data,
+        paths.data_fx_dir.?,
+    );
+    try std.testing.expect(paths.profile_layout != null);
     try std.testing.expectEqualStrings(
         "/Users/tester/" ++ profile_roots.test_relative_roots.state ++ "/sessions",
         paths.sessions_dir.?,
@@ -1792,7 +1818,10 @@ test "discoverPaths with absent HOME returns owned workspace paths only" {
     defer paths.deinit(std.testing.allocator);
 
     try std.testing.expect(paths.user_settings == null);
-    try std.testing.expect(paths.home_fx_dir == null);
+    try std.testing.expect(paths.config_fx_dir == null);
+    try std.testing.expect(paths.state_fx_dir == null);
+    try std.testing.expect(paths.data_fx_dir == null);
+    try std.testing.expect(paths.profile_layout == null);
     try std.testing.expect(paths.sessions_dir == null);
     try std.testing.expectEqualStrings("/tmp/workspace", paths.workspace_root);
     try std.testing.expectEqualStrings("/tmp/workspace/.fx.json", paths.workspace_settings);
@@ -1815,14 +1844,45 @@ test "ensureStateLayout creates only home-backed state directories" {
 
     try ensureStateLayout(paths);
 
-    const home_fx_real = try io_mod.realpathAlloc(std.testing.allocator, paths.home_fx_dir.?);
+    const home_fx_real = try io_mod.realpathAlloc(std.testing.allocator, paths.config_fx_dir.?);
     defer std.testing.allocator.free(home_fx_real);
+    const state_fx_real = try io_mod.realpathAlloc(std.testing.allocator, paths.state_fx_dir.?);
+    defer std.testing.allocator.free(state_fx_real);
     const sessions_real = try io_mod.realpathAlloc(std.testing.allocator, paths.sessions_dir.?);
     defer std.testing.allocator.free(sessions_real);
-    try std.testing.expectEqualStrings(paths.home_fx_dir.?, home_fx_real);
+    try std.testing.expectEqualStrings(paths.config_fx_dir.?, home_fx_real);
+    try std.testing.expectEqualStrings(paths.state_fx_dir.?, state_fx_real);
     try std.testing.expectEqualStrings(paths.sessions_dir.?, sessions_real);
 
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io_mod.getIo(), paths.workspace_settings, .{}));
+}
+
+test "ensureStateLayout rejects a symlinked state root" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    tmp.dir.symLink(std.testing.io, "outside", "state-link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const tmp_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(tmp_root);
+    const state_link = try std.fs.path.join(alloc, &.{ tmp_root, "state-link" });
+    defer alloc.free(state_link);
+    const workspace_settings = try alloc.dupe(u8, "workspace.json");
+    defer alloc.free(workspace_settings);
+    const workspace_root = try alloc.dupe(u8, "/tmp/workspace");
+    defer alloc.free(workspace_root);
+
+    const paths = Paths{
+        .workspace_settings = workspace_settings,
+        .state_fx_dir = state_link,
+        .workspace_root = workspace_root,
+    };
+    try std.testing.expectError(error.DurablePathUnsafe, ensureStateLayout(paths));
 }
 
 test "loadMergedSettings merges project defaults before profile layers" {
@@ -2204,8 +2264,9 @@ test "oversized user and workspace settings propagate StreamTooLong" {
     const workspace_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "workspace");
     defer std.testing.allocator.free(workspace_root);
 
-    const roots = try profile_roots.processRoots(home_root);
-    const user_settings = try profile_paths.settingsPath(std.testing.allocator, roots.config);
+    const config_root = try profile_roots.resolveRootForProcess(std.testing.allocator, home_root, .config, .{});
+    defer std.testing.allocator.free(config_root);
+    const user_settings = try profile_paths.settingsPath(std.testing.allocator, config_root);
     defer std.testing.allocator.free(user_settings);
     const workspace_settings = try std.fs.path.join(std.testing.allocator, &.{ workspace_root, ".fx.json" });
     defer std.testing.allocator.free(workspace_settings);

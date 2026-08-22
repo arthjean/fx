@@ -33,8 +33,9 @@ pub fn loadSkills(
     };
     defer if (canonical_home) |home| alloc.free(home);
     const home = canonical_home orelse configured_home;
-    const roots = try profile_roots.processRoots(home);
-    const dir = profile_paths.managedSkillsDir(alloc, roots.data) catch |err| switch (err) {
+    const data_root = try profile_roots.resolveRootForProcess(alloc, home, .data, .{});
+    defer alloc.free(data_root);
+    const dir = profile_paths.managedSkillsDir(alloc, data_root) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // An unusable HOME yields no managed skills, same as an absent one.
         error.ProfileRootNotAbsolute => return .{},
@@ -149,8 +150,9 @@ test "loadSkills loads managed skills under HOME" {
     var loaded = try loadSkills(alloc, workspace_path, test_root_policy);
     defer loaded.deinit(alloc);
 
-    const expected_roots = try profile_roots.processRoots(home_path);
-    const expected_dir = try profile_paths.managedSkillsDir(alloc, expected_roots.data);
+    const expected_root = try profile_roots.resolveRootForProcess(alloc, home_path, .data, .{});
+    defer alloc.free(expected_root);
+    const expected_dir = try profile_paths.managedSkillsDir(alloc, expected_root);
     defer alloc.free(expected_dir);
 
     try std.testing.expectEqualStrings(expected_dir, loaded.dir);

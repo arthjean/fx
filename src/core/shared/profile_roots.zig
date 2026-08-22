@@ -15,6 +15,7 @@ pub const app_dir_name = "fx";
 pub const xdg_layout_enabled = true;
 
 pub const Layout = enum { legacy, xdg };
+pub const RootKind = enum { config, state, data };
 
 /// Profile roots relative to a home, for the platform the test binary was built for. macOS pins
 /// every root to `~/.fx` while a fresh Linux profile splits across the XDG roots, so a test that
@@ -74,29 +75,6 @@ pub const Policy = struct {
     allow_xdg_layout: bool = xdg_layout_enabled,
 };
 
-/// Entries that mark `~/.fx` as a real profile. Bare existence is not enough: an empty or
-/// hand-made directory must not capture a user who never ran an older fx.
-const legacy_profile_entries = [_][]const u8{
-    profile_paths.settings_file_name,
-    profile_paths.mcp_config_file_name,
-    profile_paths.auth_file_name,
-    profile_paths.chatgpt_auth_file_name,
-    profile_paths.grok_auth_file_name,
-    profile_paths.api_key_file_name,
-    profile_paths.sessions_dir_name,
-    profile_paths.mcp_credentials_dir_name,
-    profile_paths.prompt_history_file_name,
-    profile_paths.usage_file_name,
-    profile_paths.usage_recovery_dir_name,
-    profile_paths.backups_dir_name,
-    profile_paths.memories_file_name,
-    profile_paths.managed_skills_dir_name,
-    profile_paths.logs_dir_name,
-    profile_paths.recordings_dir_name,
-    profile_paths.global_instructions_file_name,
-    "terminal-host",
-};
-
 /// Absolute path of the legacy `~/.fx` profile root. The caller owns the slice.
 pub fn legacyRoot(alloc: Allocator, home: []const u8) Allocator.Error![]u8 {
     return std.fs.path.join(alloc, &.{ home, profile_paths.root_dir_name });
@@ -123,16 +101,36 @@ pub fn resolve(alloc: Allocator, env: Environment, policy: Policy) Allocator.Err
 pub fn resolveForProcess(alloc: Allocator, home: []const u8, base: Policy) Allocator.Error!ProfileRoots {
     var policy = base;
     if (policy.allow_xdg_layout and policy.os_tag == .linux) {
-        policy.has_legacy_profile = hasLegacyProfile(alloc, home);
+        policy.has_legacy_profile = try hasLegacyProfile(alloc, home);
+    } else {
+        return legacyRoots(alloc, home);
     }
     return resolve(alloc, Environment.fromProcess(home), policy);
 }
 
-/// True when `~/.fx` holds something fx recognizes as a profile. A `~/.fx` that is not a
-/// directory also counts, so the existing `DurablePathUnsafe` handling downstream is reached
-/// unchanged instead of being routed around.
-pub fn hasLegacyProfile(alloc: Allocator, home: []const u8) bool {
-    const root = legacyRoot(alloc, home) catch return false;
+/// Resolves one root without allocating the two roots a caller does not use. The caller owns
+/// the returned path. Non-Linux targets return before reading any XDG variable.
+pub fn resolveRootForProcess(
+    alloc: Allocator,
+    home: []const u8,
+    kind: RootKind,
+    base: Policy,
+) Allocator.Error![]u8 {
+    if (!base.allow_xdg_layout or base.os_tag != .linux or base.has_legacy_profile or try hasLegacyProfile(alloc, home)) {
+        return legacyRoot(alloc, home);
+    }
+
+    return switch (kind) {
+        .config => xdgRoot(alloc, io_mod.getenv("XDG_CONFIG_HOME"), home, &.{".config"}),
+        .state => xdgRoot(alloc, io_mod.getenv("XDG_STATE_HOME"), home, &.{ ".local", "state" }),
+        .data => xdgRoot(alloc, io_mod.getenv("XDG_DATA_HOME"), home, &.{ ".local", "share" }),
+    };
+}
+
+/// True when `~/.fx` already exists. Any existing entry selects the legacy layout so fx never
+/// splits or migrates an installation implicitly. Allocation failures are propagated.
+pub fn hasLegacyProfile(alloc: Allocator, home: []const u8) Allocator.Error!bool {
+    const root = try legacyRoot(alloc, home);
     defer alloc.free(root);
 
     const zio = io_mod.getIo();
@@ -143,79 +141,8 @@ pub fn hasLegacyProfile(alloc: Allocator, home: []const u8) bool {
         error.FileNotFound => return false,
         else => return true,
     };
-    defer dir.close(zio);
-
-    var entries = dir.iterate();
-    while (entries.next(zio) catch return true) |entry| {
-        for (legacy_profile_entries) |known| {
-            if (std.mem.eql(u8, entry.name, known)) return true;
-        }
-    }
-    return false;
-}
-
-/// One resolved home, kept for the process lifetime so a pointer handed to a caller stays
-/// valid when another home resolves later.
-const CachedRoots = struct {
-    home: []u8,
-    roots: ProfileRoots,
-    next: ?*CachedRoots,
-};
-
-var cache_mutex: std.Io.Mutex = .init;
-var cache_head: ?*CachedRoots = null;
-
-fn cacheAllocator() Allocator {
-    return std.heap.page_allocator;
-}
-
-/// Resolves once per home and reuses the result, so neither the environment read nor the
-/// legacy probe repeats on a hot path. Entries are never replaced or freed, so the returned
-/// roots live for the process lifetime and must not be freed by the caller. Production
-/// resolves a single home, but callers reach this from spawned workers too, so the lookup
-/// takes a lock.
-pub fn processRoots(home: []const u8) Allocator.Error!*const ProfileRoots {
-    const zio = io_mod.getIo();
-    cache_mutex.lockUncancelable(zio);
-    defer cache_mutex.unlock(zio);
-
-    var current = cache_head;
-    while (current) |entry| : (current = entry.next) {
-        if (std.mem.eql(u8, entry.home, home)) return &entry.roots;
-    }
-
-    const alloc = cacheAllocator();
-    const entry = try alloc.create(CachedRoots);
-    errdefer alloc.destroy(entry);
-
-    const owned_home = try alloc.dupe(u8, home);
-    errdefer alloc.free(owned_home);
-
-    entry.* = .{
-        .home = owned_home,
-        .roots = try resolveForProcess(alloc, home, .{}),
-        .next = cache_head,
-    };
-    cache_head = entry;
-    return &entry.roots;
-}
-
-/// Drops every cached entry, invalidating pointers `processRoots` already returned. Tests that
-/// swap `HOME` call this; production never needs it.
-pub fn releaseProcessRoots() void {
-    const zio = io_mod.getIo();
-    cache_mutex.lockUncancelable(zio);
-    defer cache_mutex.unlock(zio);
-
-    const alloc = cacheAllocator();
-    var current = cache_head;
-    while (current) |entry| {
-        current = entry.next;
-        entry.roots.deinit(alloc);
-        alloc.free(entry.home);
-        alloc.destroy(entry);
-    }
-    cache_head = null;
+    dir.close(zio);
+    return true;
 }
 
 fn legacyRoots(alloc: Allocator, home: []const u8) Allocator.Error!ProfileRoots {
@@ -257,6 +184,16 @@ fn xdgBase(value: ?[]const u8) ?[]const u8 {
 const testing = std.testing;
 
 const linux_xdg_policy: Policy = .{ .os_tag = .linux, .allow_xdg_layout = true };
+var stable_test_environ: std.process.Environ.Map = undefined;
+var stable_test_environ_initialized = false;
+
+fn stableEmptyTestEnviron() !*const std.process.Environ.Map {
+    if (!stable_test_environ_initialized) {
+        stable_test_environ = std.process.Environ.Map.init(testing.allocator);
+        stable_test_environ_initialized = true;
+    }
+    return &stable_test_environ;
+}
 
 fn expectRoots(roots: ProfileRoots, config: []const u8, state: []const u8, data: []const u8) !void {
     try testing.expectEqualStrings(config, roots.config);
@@ -371,8 +308,8 @@ test "resolve reads the injected process environment through io getenv" {
     try env.put("XDG_STATE_HOME", "/injected/st");
     try env.put("XDG_DATA_HOME", "/injected/dat");
 
-    const previous = io_mod.environMap();
-    defer if (previous) |map| io_mod.setEnvironMap(map);
+    const previous = io_mod.environMap() orelse try stableEmptyTestEnviron();
+    defer io_mod.setEnvironMap(previous);
     io_mod.setEnvironMap(&env);
 
     var roots = try resolve(
@@ -396,7 +333,7 @@ fn makeLegacyEntry(dir: std.Io.Dir, name: []const u8, kind: enum { file, directo
     }
 }
 
-test "legacy detection ignores an absent or empty profile directory" {
+test "legacy detection accepts any existing profile directory" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "home");
@@ -404,14 +341,22 @@ test "legacy detection ignores an absent or empty profile directory" {
     const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
     defer testing.allocator.free(home);
 
-    try testing.expect(!hasLegacyProfile(testing.allocator, home));
+    try testing.expect(!(try hasLegacyProfile(testing.allocator, home)));
 
     try tmp.dir.createDirPath(std.testing.io, "home/.fx");
-    try testing.expect(!hasLegacyProfile(testing.allocator, home));
+    try testing.expect(try hasLegacyProfile(testing.allocator, home));
 
     var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
     defer roots.deinit(testing.allocator);
-    try testing.expectEqual(Layout.xdg, roots.layout);
+    try testing.expectEqual(Layout.legacy, roots.layout);
+}
+
+test "legacy detection propagates allocation failure" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(
+        error.OutOfMemory,
+        hasLegacyProfile(failing.allocator(), "/home/tester"),
+    );
 }
 
 test "legacy detection accepts a profile holding only sessions" {
@@ -426,7 +371,7 @@ test "legacy detection accepts a profile holding only sessions" {
     const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
     defer testing.allocator.free(home);
 
-    try testing.expect(hasLegacyProfile(testing.allocator, home));
+    try testing.expect(try hasLegacyProfile(testing.allocator, home));
 
     var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
     defer roots.deinit(testing.allocator);
@@ -453,7 +398,7 @@ test "legacy detection accepts a profile holding only a provider session" {
         const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
         defer testing.allocator.free(home);
 
-        try testing.expect(hasLegacyProfile(testing.allocator, home));
+        try testing.expect(try hasLegacyProfile(testing.allocator, home));
 
         var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
         defer roots.deinit(testing.allocator);
@@ -475,7 +420,7 @@ test "legacy detection accepts a profile holding only global instructions" {
 
     // A user who only ever wrote global instructions still owns a profile: splitting the roots
     // here would silently stop loading `~/.fx/AGENTS.md` without moving or reporting anything.
-    try testing.expect(hasLegacyProfile(testing.allocator, home));
+    try testing.expect(try hasLegacyProfile(testing.allocator, home));
 
     var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
     defer roots.deinit(testing.allocator);
@@ -504,8 +449,8 @@ test "legacy detection accepts a settings-only profile despite XDG variables" {
     try env.put("XDG_STATE_HOME", "/injected/st");
     try env.put("XDG_DATA_HOME", "/injected/dat");
 
-    const previous = io_mod.environMap();
-    defer if (previous) |map| io_mod.setEnvironMap(map);
+    const previous = io_mod.environMap() orelse try stableEmptyTestEnviron();
+    defer io_mod.setEnvironMap(previous);
     io_mod.setEnvironMap(&env);
 
     var roots = try resolveForProcess(testing.allocator, home, linux_xdg_policy);
@@ -527,7 +472,7 @@ test "legacy detection keeps a non-directory profile root on the legacy layout" 
     const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
     defer testing.allocator.free(home);
 
-    try testing.expect(hasLegacyProfile(testing.allocator, home));
+    try testing.expect(try hasLegacyProfile(testing.allocator, home));
 }
 
 test "legacy detection keeps a symlinked profile root on the legacy layout" {
@@ -543,45 +488,7 @@ test "legacy detection keeps a symlinked profile root on the legacy layout" {
     const home = try io_mod.dirRealpathAlloc(testing.allocator, tmp.dir, "home");
     defer testing.allocator.free(home);
 
-    try testing.expect(hasLegacyProfile(testing.allocator, home));
-}
-
-test "processRoots resolves once and reuses the cached result" {
-    releaseProcessRoots();
-    defer releaseProcessRoots();
-
-    // An empty environment pins the defaults: the host must not decide what these roots are.
-    var env = std.process.Environ.Map.init(testing.allocator);
-    defer env.deinit();
-    const previous = io_mod.environMap();
-    defer if (previous) |map| io_mod.setEnvironMap(map);
-    io_mod.setEnvironMap(&env);
-
-    const first = try processRoots("/home/cached-tester");
-    const second = try processRoots("/home/cached-tester");
-    try testing.expectEqual(first, second);
-
-    try expectRoots(
-        first.*,
-        "/home/cached-tester/" ++ test_relative_roots.config,
-        "/home/cached-tester/" ++ test_relative_roots.state,
-        "/home/cached-tester/" ++ test_relative_roots.data,
-    );
-
-    // A second home gets its own entry, and the first pointer stays valid: callers hold the
-    // returned roots for the process lifetime.
-    const other = try processRoots("/home/other-tester");
-    try testing.expectEqualStrings(
-        "/home/other-tester/" ++ test_relative_roots.config,
-        other.config,
-    );
-    try expectRoots(
-        first.*,
-        "/home/cached-tester/" ++ test_relative_roots.config,
-        "/home/cached-tester/" ++ test_relative_roots.state,
-        "/home/cached-tester/" ++ test_relative_roots.data,
-    );
-    try testing.expectEqual(first, try processRoots("/home/cached-tester"));
+    try testing.expect(try hasLegacyProfile(testing.allocator, home));
 }
 
 test "production resolves the XDG layout for a Linux profile with no legacy root" {
@@ -590,8 +497,8 @@ test "production resolves the XDG layout for a Linux profile with no legacy root
     // An empty environment pins the defaults: the host must not decide what these roots are.
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
-    const previous = io_mod.environMap();
-    defer if (previous) |map| io_mod.setEnvironMap(map);
+    const previous = io_mod.environMap() orelse try stableEmptyTestEnviron();
+    defer io_mod.setEnvironMap(previous);
     io_mod.setEnvironMap(&env);
 
     var roots = try resolveForProcess(testing.allocator, "/home/tester", .{ .os_tag = .linux });
@@ -615,8 +522,8 @@ test "production pins macOS to the legacy root whatever the environment exports"
     try env.put("XDG_STATE_HOME", "/Users/tester/xdg-state");
     try env.put("XDG_DATA_HOME", "/Users/tester/xdg-data");
 
-    const previous = io_mod.environMap();
-    defer if (previous) |map| io_mod.setEnvironMap(map);
+    const previous = io_mod.environMap() orelse try stableEmptyTestEnviron();
+    defer io_mod.setEnvironMap(previous);
     io_mod.setEnvironMap(&env);
 
     var macos = try resolveForProcess(testing.allocator, "/Users/tester", .{ .os_tag = .macos });

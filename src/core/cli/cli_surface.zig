@@ -1000,7 +1000,7 @@ fn runNonInteractiveWithDeps(
             // Preserve the original `fx logout` behavior for scripts and users.
             const login_provider = maybe_login_provider orelse .vercel;
             if (login_provider == .codex) {
-                const outcome = chatgpt_oauth.logout() catch {
+                const outcome = chatgpt_oauth.logout(alloc) catch {
                     try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
                     return .handled_failure;
                 };
@@ -5028,8 +5028,9 @@ test "status and doctor inspect the supplied MCP profile diagnostic once" {
             "\"name\":\"mcp_config\"",
         ),
     );
-    const roots = try profile_roots.processRoots(home);
-    const mcp_config_path = try profile_paths.mcpConfigPath(alloc, roots.config);
+    const config_root = try profile_roots.resolveRootForProcess(alloc, home, .config, .{});
+    defer alloc.free(config_root);
+    const mcp_config_path = try profile_paths.mcpConfigPath(alloc, config_root);
     defer alloc.free(mcp_config_path);
     const expected_mcp_detail = try std.fmt.allocPrint(
         alloc,
@@ -5044,6 +5045,8 @@ test "status and doctor inspect the supplied MCP profile diagnostic once" {
     ) != null);
 
     // doctor reports the roots it actually resolved, so an operator never has to guess them.
+    var roots = try profile_roots.resolveForProcess(alloc, home, .{});
+    defer roots.deinit(alloc);
     const expected_profile_detail = try std.fmt.allocPrint(
         alloc,
         "\"name\":\"profile\",\"status\":\"ok\",\"detail\":\"{s} layout; config={s} state={s} data={s}\"",

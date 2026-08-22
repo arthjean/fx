@@ -560,9 +560,10 @@ pub const ProfileStore = struct {
         options: Options,
     ) !ProfileStore {
         try options.validate();
-        const roots = try profile_roots.processRoots(home);
+        const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+        defer alloc.free(state_root);
         var failure: io_mod.BaseDirFailure = .{};
-        var state_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, &failure) catch |err| {
+        var state_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, &failure) catch |err| {
             debug_trace.logf(
                 "terminal_store",
                 "state root creation failed path={s} err={s}",
@@ -580,7 +581,7 @@ pub const ProfileStore = struct {
             .alloc = alloc,
             .process_provider = process_provider,
             .sessions_dir = sessions_dir,
-            .display_sessions_path = try profile_paths.sessionsDir(alloc, roots.state),
+            .display_sessions_path = try profile_paths.sessionsDir(alloc, state_root),
             .options = options,
         };
     }

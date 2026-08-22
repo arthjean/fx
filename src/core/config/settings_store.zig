@@ -309,8 +309,8 @@ pub const Store = struct {
 
     pub fn initFromHome(alloc: Allocator, home_path: []const u8, mode: OpenMode) !Store {
         const zio = io_mod.getIo();
-        const roots = try profile_roots.processRoots(home_path);
-        const config_root = roots.config;
+        const config_root = try profile_roots.resolveRootForProcess(alloc, home_path, .config, .{});
+        defer alloc.free(config_root);
 
         var durable_home = std.Io.Dir.openDirAbsolute(zio, config_root, .{
             .iterate = true,

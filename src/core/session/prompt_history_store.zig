@@ -54,6 +54,7 @@ const LineRead = struct {
 };
 
 pub const Store = struct {
+    alloc: Allocator,
     home_path: []u8,
     display_path: []u8,
     durable_home: ?io_mod.VerifiedDir = null,
@@ -68,10 +69,11 @@ pub const Store = struct {
 
     pub fn initFromHome(alloc: Allocator, home_path: []const u8) !Store {
         const zio = io_mod.getIo();
-        const roots = try profile_roots.processRoots(home_path);
+        const state_root = try profile_roots.resolveRootForProcess(alloc, home_path, .state, .{});
+        defer alloc.free(state_root);
 
         var durable_home: ?io_mod.VerifiedDir = null;
-        if (std.Io.Dir.openDirAbsolute(zio, roots.state, .{
+        if (std.Io.Dir.openDirAbsolute(zio, state_root, .{
             .iterate = true,
             .follow_symlinks = false,
         })) |dir| {
@@ -86,8 +88,9 @@ pub const Store = struct {
         }
 
         return .{
+            .alloc = alloc,
             .home_path = try alloc.dupe(u8, home_path),
-            .display_path = try profile_paths.promptHistoryPath(alloc, roots.state),
+            .display_path = try profile_paths.promptHistoryPath(alloc, state_root),
             .durable_home = durable_home,
         };
     }
@@ -225,8 +228,9 @@ pub const Store = struct {
         if (self.fail_private_mode) return error.PrivateStatePermissionsUnsupported;
         if (self.durable_home == null) {
             if (self.fail_layout_creation) return error.DurableLayoutFailed;
-            const roots = profile_roots.processRoots(self.home_path) catch return error.DurableLayoutFailed;
-            self.durable_home = io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, null) catch |err| switch (err) {
+            const state_root = profile_roots.resolveRootForProcess(self.alloc, self.home_path, .state, .{}) catch return error.DurableLayoutFailed;
+            defer self.alloc.free(state_root);
+            self.durable_home = io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, null) catch |err| switch (err) {
                 error.PrivateStatePermissionsUnsupported, error.DurablePathUnsafe => return err,
                 else => return error.DurableLayoutFailed,
             };
@@ -865,13 +869,16 @@ fn filterOtherWorkspaceRecords(
 }
 
 fn historyPath(alloc: Allocator, home: []const u8) ![]u8 {
-    const roots = try profile_roots.processRoots(home);
-    return profile_paths.promptHistoryPath(alloc, roots.state);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
+    return profile_paths.promptHistoryPath(alloc, state_root);
 }
 
 fn ensureFixtureHome(home: []const u8) !void {
-    const roots = try profile_roots.processRoots(home);
-    var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, null);
+    const alloc = std.testing.allocator;
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
+    var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, null);
     root.close();
 }
 
@@ -1080,8 +1087,7 @@ test "oversized prompt history record is skipped without creating durable state"
         try store.append(alloc, 1, "/tmp/workspace", oversized),
     );
 
-    const fx_roots = try profile_roots.processRoots(home);
-    const fx_path = try alloc.dupe(u8, fx_roots.state);
+    const fx_path = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
     defer alloc.free(fx_path);
     try std.testing.expectError(
         error.FileNotFound,
@@ -1323,8 +1329,7 @@ test "read-only empty home load creates no prompt history state" {
     defer freeLoadedEntries(alloc, entries);
     try std.testing.expectEqual(@as(usize, 0), entries.len);
 
-    const fx_roots = try profile_roots.processRoots(home);
-    const fx_path = try alloc.dupe(u8, fx_roots.state);
+    const fx_path = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
     defer alloc.free(fx_path);
     try std.testing.expectError(
         error.FileNotFound,
@@ -1343,8 +1348,7 @@ test "first append creates only private prompt history layout and reports layout
     defer store.deinit(alloc);
     _ = try store.append(alloc, 1, "/tmp/workspace", "first");
 
-    const fx_roots = try profile_roots.processRoots(home);
-    const fx_path = try alloc.dupe(u8, fx_roots.state);
+    const fx_path = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
     defer alloc.free(fx_path);
     var fx_dir = try std.Io.Dir.openDirAbsolute(
         std.testing.io,

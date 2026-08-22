@@ -24,7 +24,6 @@ TRAINING_E2E_TESTS = (
     "ask-presentation.test.ts",
     "config-persistence.test.ts",
     "prompt-history.test.ts",
-    "profile-layout.test.ts",
     "auth-refresh.test.ts",
     "file-tool-paths.test.ts",
     "file-tool-permissions.test.ts",
@@ -56,6 +55,7 @@ TRAINING_E2E_TESTS = (
 VERIFICATION_E2E_TESTS = (
     "auto-mode-reliability.test.ts",
     "oauth-keychain-migration.test.ts",
+    "profile-layout.test.ts",
     "tui-auth-source-selection.test.ts",
     "tui-composer-edit-contracts.test.ts",
     "tui-cost.test.ts",
@@ -365,15 +365,10 @@ class PgsoCorpusTests(unittest.TestCase):
             EXCLUDED_E2E_TESTS,
             tuple(test_file for test_file, _ in corpus.intentional_exclusions),
         )
-        self.assertEqual(37, len(corpus.scenarios))
+        self.assertEqual(36, len(corpus.scenarios))
         self.assertEqual(54, len(corpus.candidate_scenarios))
         self.assertEqual(
-            (
-                ("direct-status", 100),
-                ("direct-background", 100),
-                ("direct-doctor", 100),
-                ("direct-sessions", 100),
-            ),
+            (("direct-sessions", 100),),
             tuple(
                 (scenario.name, scenario.profile_runs)
                 for scenario in corpus.scenarios

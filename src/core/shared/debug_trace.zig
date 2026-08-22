@@ -447,8 +447,9 @@ fn defaultLogPath(alloc: Allocator) ![]u8 {
         // Tracing is often the first thing a session does, so it can be what brings the state
         // root into existence. Create it under the private contract instead of letting the
         // generic parent walk below leave the root readable by the rest of the profile.
-        const roots = try profile_roots.processRoots(home);
-        var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, null);
+        const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+        defer alloc.free(state_root);
+        var root = try io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, null);
         root.close();
         return path;
     }
@@ -456,8 +457,9 @@ fn defaultLogPath(alloc: Allocator) ![]u8 {
 }
 
 fn defaultLogPathForHome(alloc: Allocator, home: []const u8) ![]u8 {
-    const roots = try profile_roots.processRoots(home);
-    return profile_paths.traceLogPath(alloc, roots.state);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
+    return profile_paths.traceLogPath(alloc, state_root);
 }
 
 fn fallbackLogPathForMillis(alloc: Allocator, millis: i64) ![]u8 {

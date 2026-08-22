@@ -21,7 +21,7 @@ import {
   TmuxSession,
   tmuxAvailable,
 } from "./tmux-helpers";
-import { XDG_ENV_KEYS } from "../evals/eval-helpers";
+import { XDG_ENV_KEYS } from "../test-support/profile-env";
 
 const tmuxTest = test.skipIf(!tmuxAvailable());
 const ISOLATED_KEYS = [
@@ -329,7 +329,6 @@ tmuxTest("tmux launch pins the XDG roots inside the pane HOME", async () => {
     XDG_CONFIG_HOME: join(root, "host-config"),
     XDG_STATE_HOME: hostStateHome,
     XDG_DATA_HOME: join(root, "host-data"),
-    XDG_RUNTIME_DIR: join(root, "host-runtime"),
   };
   for (const value of Object.values(staleValues)) mkdirSync(value, { recursive: true });
   mkdirSync(paneHome, { recursive: true });
@@ -368,7 +367,6 @@ tmuxTest("tmux launch pins the XDG roots inside the pane HOME", async () => {
       XDG_CONFIG_HOME: join(paneHome, ".config"),
       XDG_STATE_HOME: join(paneHome, ".local", "state"),
       XDG_DATA_HOME: join(paneHome, ".local", "share"),
-      XDG_RUNTIME_DIR: null,
     });
     // The seeded host state root stays untouched: nothing the pane runs can reach it.
     expect(readdirSync(hostStateHome)).toEqual([]);

@@ -124,14 +124,14 @@ On Linux, fx splits the profile across the three XDG Base Directory roots, appen
 | state | `XDG_STATE_HOME` | `~/.local/state/fx` | `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, `terminal-host/` |
 | data | `XDG_DATA_HOME` | `~/.local/share/fx` | `skills/`, `memories.json` |
 
-A variable that is unset, empty, or relative is ignored in favor of the default. The terminal host places its socket under `XDG_RUNTIME_DIR` and falls back to a private per-user directory under `/tmp` when that variable is unusable.
+A variable that is unset, empty, or relative is ignored in favor of the default.
 
 Two rules override the resolution above:
 
-* A legacy profile wins. When `~/.fx` already holds a recognized profile entry, all three roots collapse back to `~/.fx`. fx never moves, copies, or deletes anything to migrate an existing profile.
+* A legacy profile wins. When `~/.fx` already exists, all three roots collapse back to `~/.fx`. fx never moves, copies, or deletes anything to migrate an existing profile.
 * Only Linux splits. macOS and every other target resolve all three roots to `~/.fx` whatever the XDG environment exports.
 
-Run `fx doctor` to read the active layout and the three resolved roots instead of inferring them. Migrating a legacy `~/.fx` by hand means three moves, one per destination, and never a single `mv`: `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` go to the config root, `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` go to the state root, and `skills/` and `memories.json` go to the data root. The split only takes effect once no recognized entry is left in `~/.fx`.
+Run `fx doctor` to read the active layout and the three resolved roots instead of inferring them. Migrating a legacy `~/.fx` by hand means three moves, one per destination, and never a single `mv`: `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` go to the config root, `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` go to the state root, and `skills/` and `memories.json` go to the data root. The split only takes effect once `~/.fx` no longer exists.
 
 Config precedence (highest wins):
 

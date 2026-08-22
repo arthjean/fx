@@ -405,8 +405,9 @@ fn openFixtureOwnerCapability(
     alloc: Allocator,
     home: []const u8,
 ) !session_child_store.SessionChildCapability {
-    const roots = try profile_roots.processRoots(home);
-    const sessions_path = try profile_paths.sessionsDir(alloc, roots.state);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
+    const sessions_path = try profile_paths.sessionsDir(alloc, state_root);
     defer alloc.free(sessions_path);
     const owner_path = try std.fs.path.join(
         alloc,

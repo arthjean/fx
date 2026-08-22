@@ -996,8 +996,8 @@ pub const Root = struct {
         mode: OpenMode,
     ) !Root {
         const zio = io_mod.getIo();
-        const roots = try profile_roots.processRoots(home_path);
-        const state_root = roots.state;
+        const state_root = try profile_roots.resolveRootForProcess(alloc, home_path, .state, .{});
+        defer alloc.free(state_root);
 
         var durable_home = std.Io.Dir.openDirAbsolute(zio, state_root, .{
             .iterate = true,

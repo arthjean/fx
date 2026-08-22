@@ -366,8 +366,9 @@ fn issuerMismatchResult(
 }
 
 pub fn configPathFromHome(alloc: Allocator, home: []const u8) ![]u8 {
-    const roots = try profile_roots.processRoots(home);
-    return profile_paths.mcpConfigPath(alloc, roots.config);
+    const config_root = try profile_roots.resolveRootForProcess(alloc, home, .config, .{});
+    defer alloc.free(config_root);
+    return profile_paths.mcpConfigPath(alloc, config_root);
 }
 
 pub fn loadRuntime(

@@ -78,12 +78,13 @@ pub const Mutation = struct {
 pub fn load(alloc: Allocator) !?Session {
     if (comptime host_target.is_wasm) return null;
     const home = io_mod.getenv("HOME") orelse return null;
-    const roots = profile_roots.processRoots(home) catch |err| {
+    const state_root = profile_roots.resolveRootForProcess(alloc, home, .state, .{}) catch |err| {
         debug_trace.logf("auth", "ChatGPT session load failed step=resolve_roots err={s}", .{@errorName(err)});
         return null;
     };
+    defer alloc.free(state_root);
 
-    var fx_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), roots.state, .{
+    var fx_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), state_root, .{
         .iterate = true,
         .follow_symlinks = false,
     }) catch |err| {
@@ -131,29 +132,31 @@ fn loadFromDir(alloc: Allocator, fx_dir: *std.Io.Dir, report_open_failure: bool)
 
 pub fn saveNewSession(alloc: Allocator, session: Session) !void {
     if (comptime host_target.is_wasm) return error.ChatGptOAuthUnavailable;
-    var mutation = try beginMutation();
+    var mutation = try beginMutation(alloc);
     defer mutation.deinit();
     try mutation.save(alloc, session);
 }
 
-pub fn beginExistingMutation() !?Mutation {
+pub fn beginExistingMutation(alloc: Allocator) !?Mutation {
     if (comptime host_target.is_wasm) return null;
     const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
-    const roots = try profile_roots.processRoots(home);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
 
-    const fx_dir = openExistingPrivateFxDir(roots.state) catch |err| switch (err) {
+    const fx_dir = openExistingPrivateFxDir(state_root) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
     return try lockMutation(fx_dir);
 }
 
-fn beginMutation() !Mutation {
+fn beginMutation(alloc: Allocator) !Mutation {
     const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
-    const roots = try profile_roots.processRoots(home);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home, .state, .{});
+    defer alloc.free(state_root);
 
     var failure: io_mod.BaseDirFailure = .{};
-    const fx_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, &failure) catch |err| {
+    const fx_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, &failure) catch |err| {
         debug_trace.logf(
             "auth",
             "state root creation failed path={s} err={s}",

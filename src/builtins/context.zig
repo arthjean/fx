@@ -313,7 +313,7 @@ fn selectProjectContext(alloc: Allocator, options: SelectionOptions) context_con
                 if (canonical_home) |home_root| {
                     // The global instruction file is user-authored configuration, not installed
                     // data, so it follows the config root rather than the data root.
-                    const config_root = (try profile_roots.processRoots(home_root)).config;
+                    const config_root = try profile_roots.resolveRootForProcess(arena, home_root, .config, .{});
                     global_source_path = try std.fs.path.join(
                         arena,
                         &.{ config_root, profile_paths.global_instructions_file_name },

@@ -72,6 +72,7 @@ const TailBoundary = struct {
 };
 
 pub const Store = struct {
+    alloc: Allocator,
     home_path: []u8,
     durable_home: ?io_mod.VerifiedDir = null,
     lock_ops: io_mod.LockOps = .{},
@@ -80,8 +81,9 @@ pub const Store = struct {
         const owned_home = try alloc.dupe(u8, home_path);
         errdefer alloc.free(owned_home);
         return .{
+            .alloc = alloc,
             .home_path = owned_home,
-            .durable_home = try openExistingDurableHome(home_path),
+            .durable_home = try openExistingDurableHome(alloc, home_path),
         };
     }
 
@@ -234,7 +236,7 @@ pub const Store = struct {
     /// Loads one stable read-only boundary without creating profile state.
     pub fn load(self: *Store, alloc: Allocator) !Loaded {
         if (self.durable_home == null) {
-            self.durable_home = try openExistingDurableHome(self.home_path);
+            self.durable_home = try openExistingDurableHome(alloc, self.home_path);
         }
         try self.validateReadable();
         while (true) {
@@ -279,9 +281,10 @@ pub const Store = struct {
 
     fn ensureWritable(self: *Store) !void {
         if (self.durable_home == null) {
-            const roots = profile_roots.processRoots(self.home_path) catch return error.DurableLayoutFailed;
+            const state_root = profile_roots.resolveRootForProcess(self.alloc, self.home_path, .state, .{}) catch return error.DurableLayoutFailed;
+            defer self.alloc.free(state_root);
             self.durable_home = io_mod.openOrCreateVerifiedPrivateRootAbsolute(
-                roots.state,
+                state_root,
                 null,
             ) catch |err| switch (err) {
                 error.PrivateStatePermissionsUnsupported, error.DurablePathUnsafe => return err,
@@ -609,11 +612,12 @@ fn openExistingUsageFile(
     };
 }
 
-fn openExistingDurableHome(home_path: []const u8) !?io_mod.VerifiedDir {
+fn openExistingDurableHome(alloc: Allocator, home_path: []const u8) !?io_mod.VerifiedDir {
     const zio = io_mod.getIo();
-    const roots = try profile_roots.processRoots(home_path);
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home_path, .state, .{});
+    defer alloc.free(state_root);
 
-    if (std.Io.Dir.openDirAbsolute(zio, roots.state, .{
+    if (std.Io.Dir.openDirAbsolute(zio, state_root, .{
         .iterate = true,
         .follow_symlinks = false,
     })) |dir| {

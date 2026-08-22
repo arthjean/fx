@@ -10,12 +10,8 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  FX_BIN,
-  REPO_ROOT,
-  XDG_ENV_KEYS,
-  xdgEnvForHome,
-} from "../evals/eval-helpers";
+import { FX_BIN, REPO_ROOT } from "../evals/eval-helpers";
+import { XDG_ENV_KEYS, xdgEnvForHome } from "../test-support/profile-env";
 
 let sessionCounter = 0;
 
@@ -34,8 +30,7 @@ const DEFAULT_UNSET_ENV_KEYS = [
   "FX_E2E_GATEWAY_CREDITS_URL",
   "FX_E2E_UPGRADE_BASE_URL",
   "FX_PERMISSION_MODE",
-  // fx resolves its profile roots from the XDG environment, and the terminal host places its
-  // socket under XDG_RUNTIME_DIR. Every value the pane sees is set from the fixture HOME
+  // fx resolves its profile roots from the XDG environment. Every value the pane sees is set from the fixture HOME
   // below, so nothing here is inherited from the developer's machine.
   ...XDG_ENV_KEYS,
 ] as const;

@@ -112,8 +112,9 @@ fn memoryStoreFailure(alloc: Allocator, comptime template: []const u8) Allocator
 
 fn resolvedMemoriesPath(alloc: Allocator) ?[]u8 {
     const home = io_mod.getenv("HOME") orelse return null;
-    const roots = profile_roots.processRoots(home) catch return null;
-    return profile_paths.memoriesPath(alloc, roots.data) catch null;
+    const data_root = profile_roots.resolveRootForProcess(alloc, home, .data, .{}) catch return null;
+    defer alloc.free(data_root);
+    return profile_paths.memoriesPath(alloc, data_root) catch null;
 }
 
 pub fn execute(arena: Allocator, args_json: []const u8) ![]u8 {
@@ -127,8 +128,9 @@ fn runMemory(alloc: Allocator, action: []const u8, fact: ?[]const u8) ![]u8 {
     if (!isSupportedAction(action)) return error.UnsupportedMemoryAction;
 
     const home = io_mod.getenv("HOME") orelse return std.fmt.allocPrint(alloc, "memory unavailable: HOME not set", .{});
-    const roots = try profile_roots.processRoots(home);
-    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
+    const data_root = try profile_roots.resolveRootForProcess(alloc, home, .data, .{});
+    defer alloc.free(data_root);
+    const memories_path = try profile_paths.memoriesPath(alloc, data_root);
     defer alloc.free(memories_path);
 
     if (std.mem.eql(u8, action, "save")) {
@@ -410,8 +412,9 @@ test "memory loader distinguishes missing oversized and unreadable stores" {
 
     const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
     defer alloc.free(home);
-    const roots = try profile_roots.processRoots(home);
-    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
+    const data_root = try profile_roots.resolveRootForProcess(alloc, home, .data, .{});
+    defer alloc.free(data_root);
+    const memories_path = try profile_paths.memoriesPath(alloc, data_root);
     defer alloc.free(memories_path);
 
     var missing = try loadMemories(alloc, memories_path);
@@ -455,8 +458,9 @@ test "memory owner preserves active output behavior" {
     try expectMemoryOutput("{\"action\":\"save\",\"fact\":\"likes Zig\"}", "remembered");
     try expectMemoryOutput("{\"action\":\"list\"}", "- likes Zig\n");
 
-    const roots = try profile_roots.processRoots(home);
-    const memories_path = try profile_paths.memoriesPath(alloc, roots.data);
+    const data_root = try profile_roots.resolveRootForProcess(alloc, home, .data, .{});
+    defer alloc.free(data_root);
+    const memories_path = try profile_paths.memoriesPath(alloc, data_root);
     defer alloc.free(memories_path);
     var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), memories_path, .{});
     const content = blk: {

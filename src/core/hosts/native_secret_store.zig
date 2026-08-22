@@ -91,12 +91,13 @@ fn loadFromProfile(alloc: Allocator) LoadError!?[]u8 {
         debug_trace.logf("stored_key", "load failed step=home err=HomeNotSet", .{});
         return error.StoredKeyUnreadable;
     };
-    const roots = profile_roots.processRoots(home) catch |err| {
+    const state_root = profile_roots.resolveRootForProcess(alloc, home, .state, .{}) catch |err| {
         debug_trace.logf("stored_key", "load failed step=resolve_roots err={s}", .{@errorName(err)});
         return error.StoredKeyUnreadable;
     };
+    defer alloc.free(state_root);
 
-    var fx_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), roots.state, .{
+    var fx_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), state_root, .{
         .iterate = true,
         .follow_symlinks = false,
     }) catch |err| switch (err) {
@@ -156,11 +157,12 @@ fn loadFromDir(alloc: Allocator, fx_dir: *std.Io.Dir) LoadError!?[]u8 {
 
 fn storeInProfile(alloc: Allocator, value: []const u8) StoreError!void {
     const home = io_mod.getenv("HOME") orelse return writeFailed("home", error.HomeNotSet);
-    const roots = profile_roots.processRoots(home) catch |err| {
+    const state_root = profile_roots.resolveRootForProcess(alloc, home, .state, .{}) catch |err| {
         return writeFailed("resolve_roots", err);
     };
+    defer alloc.free(state_root);
 
-    var fx_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(roots.state, null) catch |err| {
+    var fx_dir = io_mod.openOrCreateVerifiedPrivateRootAbsolute(state_root, null) catch |err| {
         return writeFailed("open_profile", err);
     };
     defer fx_dir.close();

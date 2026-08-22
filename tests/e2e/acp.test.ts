@@ -811,9 +811,6 @@ class AcpClient {
   }): Promise<AcpClient> {
     const args = opts?.args ?? ["acp"];
     const inheritedEnv: Record<string, string | undefined> = { ...process.env };
-    // Test homes share a uid, so an inherited runtime directory would make them share one
-    // terminal-host socket instead of isolating per home.
-    delete inheritedEnv.XDG_RUNTIME_DIR;
     if (opts?.omitHome) delete inheritedEnv.HOME;
     for (const [key, value] of Object.entries(opts?.env ?? {})) {
       if (value === undefined) {

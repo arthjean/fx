@@ -11,6 +11,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  fxProfileRoots,
+  XDG_ENV_KEYS,
+  xdgEnvForHome,
+} from "../test-support/profile-env";
+
+export { fxProfileRoots, XDG_ENV_KEYS, xdgEnvForHome };
 
 export const FX_BIN = resolve(import.meta.dirname, "../../zig-out/bin/fx");
 export const REPO_ROOT = resolve(import.meta.dirname, "../..");
@@ -454,56 +461,6 @@ function captureFxProcessState(): string {
   } catch {
     return "process snapshot unavailable";
   }
-}
-
-export const XDG_ENV_KEYS = [
-  "XDG_CONFIG_HOME",
-  "XDG_STATE_HOME",
-  "XDG_DATA_HOME",
-  "XDG_RUNTIME_DIR",
-] as const;
-
-/**
- * XDG variables the process under test must see. fx resolves its profile roots from these, so
- * an inherited host value would send writes outside the fixture HOME. Pinning them to the
- * specification defaults under that HOME keeps the resolved layout identical to an unset
- * environment while confining every write to the fixture.
- *
- * XDG_RUNTIME_DIR is always cleared rather than redirected: every fixture home shares this
- * process' uid, so an inherited runtime directory would give them one shared terminal-host
- * socket instead of isolating per home. Tests that exercise it set it back explicitly.
- */
-export function xdgEnvForHome(
-  home: string | undefined,
-): Record<string, string | undefined> {
-  if (!home) {
-    return Object.fromEntries(XDG_ENV_KEYS.map((key) => [key, undefined]));
-  }
-  return {
-    XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_STATE_HOME: join(home, ".local", "state"),
-    XDG_DATA_HOME: join(home, ".local", "share"),
-    XDG_RUNTIME_DIR: undefined,
-  };
-}
-
-/**
- * Roots fx resolves for a fixture HOME that holds no recognized `~/.fx` entry. Linux splits the
- * profile across the XDG roots; macOS and every other target keep all three on `~/.fx`. A fixture
- * that seeds a legacy entry itself resolves to `~/.fx` on every platform and must not use this.
- */
-export function fxProfileRoots(
-  home: string,
-): { config: string; state: string; data: string } {
-  if (process.platform !== "linux") {
-    const legacy = join(home, ".fx");
-    return { config: legacy, state: legacy, data: legacy };
-  }
-  return {
-    config: join(home, ".config", "fx"),
-    state: join(home, ".local", "state", "fx"),
-    data: join(home, ".local", "share", "fx"),
-  };
 }
 
 export async function runFx(

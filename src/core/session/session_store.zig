@@ -466,11 +466,13 @@ fn initialIndexEffect(state: session_codec.DurableSessionState) InitialIndexEffe
 pub const default_resume_page_limit: usize = 10;
 
 fn openUsageRecoveryProfileRoot(
+    alloc: Allocator,
     home_path: []const u8,
 ) !?io_mod.VerifiedDir {
     const zio = io_mod.getIo();
-    const roots = try profile_roots.processRoots(home_path);
-    var profile = std.Io.Dir.openDirAbsolute(zio, roots.state, .{
+    const state_root = try profile_roots.resolveRootForProcess(alloc, home_path, .state, .{});
+    defer alloc.free(state_root);
+    var profile = std.Io.Dir.openDirAbsolute(zio, state_root, .{
         .iterate = true,
         .follow_symlinks = false,
     }) catch |err| switch (err) {
@@ -489,9 +491,10 @@ fn openUsageRecoveryProfileRoot(
 }
 
 fn openUsageRecoveryDir(
+    alloc: Allocator,
     home_path: []const u8,
 ) !?io_mod.VerifiedDir {
-    var profile = try openUsageRecoveryProfileRoot(home_path) orelse return null;
+    var profile = try openUsageRecoveryProfileRoot(alloc, home_path) orelse return null;
     defer profile.close();
     var dir = profile.dir.openDir(io_mod.getIo(), usage_recovery_dir, .{
         .iterate = true,
@@ -564,6 +567,7 @@ fn validateUsageRecoveryMarker(
 }
 
 pub const Store = struct {
+    alloc: Allocator,
     sessions_dir: []u8,
     home_dir: []u8,
     workspace_root: []u8,
@@ -2084,7 +2088,7 @@ pub const Store = struct {
         }
         _ = self.canonical_root.sessions orelse
             return error.SessionStoreUnavailable;
-        var profile = try openUsageRecoveryProfileRoot(self.home_dir) orelse
+        var profile = try openUsageRecoveryProfileRoot(alloc, self.home_dir) orelse
             return error.SessionStoreUnavailable;
         defer profile.close();
         var recovery = try io_mod.openOrCreateVerifiedPrivateDir(
@@ -2129,7 +2133,7 @@ pub const Store = struct {
         }
         _ = self.canonical_root.sessions orelse
             return error.SessionStoreUnavailable;
-        var recovery = try openUsageRecoveryDir(self.home_dir) orelse return;
+        var recovery = try openUsageRecoveryDir(self.alloc, self.home_dir) orelse return;
         defer recovery.close();
         _ = validateUsageRecoveryMarker(&recovery, session_id) catch |err| switch (err) {
             error.UsageRecoveryMarkerNotFound => return,
@@ -2149,7 +2153,7 @@ pub const Store = struct {
         self: Store,
         alloc: Allocator,
     ) !std.ArrayList(UsageRecoverySession) {
-        var recovery = try openUsageRecoveryDir(self.home_dir) orelse
+        var recovery = try openUsageRecoveryDir(alloc, self.home_dir) orelse
             return std.ArrayList(UsageRecoverySession).empty;
         defer recovery.close();
 
@@ -4916,6 +4920,7 @@ fn initWithHome(alloc: Allocator, home: []const u8, workspace_root: []const u8, 
     const owned_workspace = try alloc.dupe(u8, trimmed_workspace);
     errdefer alloc.free(owned_workspace);
     return .{
+        .alloc = alloc,
         .sessions_dir = sessions_dir,
         .home_dir = home_dir,
         .workspace_root = owned_workspace,

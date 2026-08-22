@@ -125,11 +125,11 @@ On Linux, the profile is split across the three XDG Base Directory roots, with `
 | state | `XDG_STATE_HOME` | `~/.local/state/fx` | `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, `terminal-host/` |
 | data | `XDG_DATA_HOME` | `~/.local/share/fx` | `skills/`, `memories.json` |
 
-A variable that is unset, empty, or holds a relative path is ignored in favor of the default. The terminal host takes its socket directory from `XDG_RUNTIME_DIR`, falling back to a private per-user directory under `/tmp`.
+A variable that is unset, empty, or holds a relative path is ignored in favor of the default.
 
-Two rules override that resolution. A legacy `~/.fx` holding a recognized profile entry collapses all three roots back to `~/.fx`, and fx never moves, copies, or deletes anything to migrate. macOS and every other non-Linux target resolve all three roots to `~/.fx` whatever the XDG environment exports.
+Two rules override that resolution. An existing legacy `~/.fx` collapses all three roots back to `~/.fx`, and fx never moves, copies, or deletes anything to migrate. macOS and every other non-Linux target resolve all three roots to `~/.fx` whatever the XDG environment exports.
 
-Moving a legacy profile is a manual three-destination operation, never a single `mv`. Send `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` to the config root; `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` to the state root; and `skills/` and `memories.json` to the data root. The XDG layout activates only once `~/.fx` holds no recognized entry.
+Moving a legacy profile is a manual three-destination operation, never a single `mv`. Send `settings.json`, `mcp.json`, `AGENTS.md`, and `backups/` to the config root; `sessions/`, `logs/`, `history.jsonl`, `recordings/`, `usage.jsonl`, `usage-recovery/`, `auth.json`, `chatgpt-auth.json`, `grok-auth.json`, `api-key`, `mcp-credentials/`, and `terminal-host/` to the state root; and `skills/` and `memories.json` to the data root. The XDG layout activates only once `~/.fx` no longer exists.
 
 `fx doctor` reports the active layout and the three resolved roots. Use it instead of assuming a path when debugging.
 
