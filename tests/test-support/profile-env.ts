@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export const XDG_ENV_KEYS = [
@@ -22,8 +23,8 @@ export function xdgEnvForHome(
 export function fxProfileRoots(
   home: string,
 ): { config: string; state: string; data: string } {
-  if (process.platform !== "linux") {
-    const legacy = join(home, ".fx");
+  const legacy = join(home, ".fx");
+  if (process.platform !== "linux" || existsSync(legacy)) {
     return { config: legacy, state: legacy, data: legacy };
   }
   return {

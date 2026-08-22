@@ -13628,7 +13628,7 @@ test "history page maps missing unsafe unavailable unsupported and corrupt sessi
     tmp.dir.symLink(
         io_mod.getIo(),
         outside_session,
-        "home/" ++ profile_roots.test_relative_roots.state ++ "/sessions/history-unsafe",
+        "home/" ++ profile_paths.root_dir_name ++ "/sessions/history-unsafe",
         .{ .is_directory = true },
     ) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
