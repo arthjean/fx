@@ -177,7 +177,7 @@ describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
       writeFileSync(headPath, "ref: refs/heads/initial-branch\n");
       writeFileSync(
         join(home, ".fx", "settings.json"),
-        `${JSON.stringify({ statusLine: { workspace: true } })}\n`,
+        `${JSON.stringify({ statusLine: { workspace: true }, fast_mode: false })}\n`,
       );
       writeFileSync(stderrPath, "");
 
