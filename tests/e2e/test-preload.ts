@@ -1,10 +1,10 @@
 /**
  * Suite-wide XDG isolation.
  *
- * fx resolves its profile roots from XDG_CONFIG_HOME, XDG_STATE_HOME, and XDG_DATA_HOME, and
- * Most fixtures spawn the binary with a temporary HOME and a spread of `process.env`, so a
- * developer machine that exports any of
- * these would send fx writes outside the fixture and produce results that differ from CI.
+ * fx resolves its profile roots from XDG_CONFIG_HOME, XDG_STATE_HOME, and XDG_DATA_HOME, and most
+ * fixtures spawn the binary with a temporary HOME and a spread of `process.env`, so a developer
+ * machine that exports any of these would send fx writes outside the fixture and produce results
+ * that differ from CI.
  *
  * Clearing them here covers every spawn route at once, including the fixtures that do not go
  * through `TmuxSession` or `runFx`. Helpers still set the three profile variables explicitly
