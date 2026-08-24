@@ -103,7 +103,7 @@ describe.skipIf(SKIP)("tui: custom slash commands", () => {
           FX_AUTO_UPGRADE: "0",
         },
         stderrPath: fixture.stderrPath,
-        width: 180,
+        width: 260,
         height: 30,
       });
       await session.waitForComposer(10_000);
@@ -165,7 +165,7 @@ describe.skipIf(SKIP)("tui: custom slash commands", () => {
           FX_TRACE_SCOPES: "commands",
         },
         stderrPath: fixture.stderrPath,
-        width: 180,
+        width: 260,
         height: 30,
       });
       await session.waitForComposer(10_000);
