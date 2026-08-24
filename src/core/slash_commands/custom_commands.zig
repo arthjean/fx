@@ -1215,9 +1215,15 @@ test "a same-root duplicate keeps the first entry in directory order" {
     defer prompts_dir.close(io_mod.getIo());
     var iterator = prompts_dir.iterate();
     const first_entry = (try iterator.next(io_mod.getIo())).?;
+    const second_entry = (try iterator.next(io_mod.getIo())) orelse {
+        // A case-insensitive volume cannot represent both extension variants,
+        // so the same-root collision is not constructible on that filesystem.
+        return error.SkipZigTest;
+    };
     const first_name = try alloc.dupe(u8, first_entry.name);
     defer alloc.free(first_name);
-    const second_name = if (std.mem.eql(u8, first_name, "foo.md")) "foo.MD" else "foo.md";
+    const second_name = try alloc.dupe(u8, second_entry.name);
+    defer alloc.free(second_name);
 
     var discovery = try loadFromTmp(alloc, &tmp, "workspace");
     defer discovery.deinit(alloc);
